@@ -4,8 +4,8 @@
  */
 
 import { state, pushUndo, removeEl, upsert, undo, redo } from './state.js';
-import { screenToWorld, worldToScreen, uid, clamp } from './utils.js';
-import { requestRender, NOTE_FONT } from './renderer.js';
+import { screenToWorld, worldToScreen, uid, clamp, toast } from './utils.js';
+import { requestRender, NOTE_FONT, clearImageCache } from './renderer.js';
 import { openEditor, closeEditor } from './editor.js';
 import { broadcastCursor, broadcastThrottled } from './network.js';
 import { selectTool, updateZoomLabel } from './toolbar.js';
@@ -64,6 +64,10 @@ export function pick(p) {
   }
   for (let i = ids.length - 1; i >= 0; i--) {
     const el = state.elements[ids[i]];
+    if (el.type === 'image' && hitNote(el, p)) return el;
+  }
+  for (let i = ids.length - 1; i >= 0; i--) {
+    const el = state.elements[ids[i]];
     if (el.type === 'stroke' && distToStroke(el, p)) return el;
   }
   for (let i = ids.length - 1; i >= 0; i--) {
@@ -105,7 +109,7 @@ export function contentBounds() {
   for (const id in state.elements) {
     const el = state.elements[id];
     let x0, y0, x1, y1;
-    if (el.type === 'note') {
+    if (el.type === 'note' || el.type === 'image') {
       x0 = el.x; y0 = el.y; x1 = el.x + el.w; y1 = el.y + el.h;
     } else if (el.type === 'stroke') {
       for (const pt of el.points) {
@@ -204,7 +208,7 @@ export function initInteraction() {
       return;
     }
     
-    if (hit.type === 'note' && state.selectedId === hit.id) {
+    if ((hit.type === 'note' || hit.type === 'image') && state.selectedId === hit.id) {
       const hk = hitHandle(hit, sp);
       if (hk) {
         pushUndo();
@@ -214,7 +218,7 @@ export function initInteraction() {
     }
     
     state.selectedId = hit.id;
-    if (hit.type === 'note') {
+    if (hit.type === 'note' || hit.type === 'image') {
       pushUndo();
       state.drag = { mode: 'move', id: hit.id, dx: wp.x - hit.x, dy: wp.y - hit.y, moved: false };
     } else if (hit.type === 'stroke') {
@@ -400,6 +404,79 @@ export function initInteraction() {
     if (e.code === 'Space') {
       state.spaceDown = false;
       stage.classList.remove('space');
+    }
+  });
+
+  // 粘贴图片处理 (P2P 局域/对等网络范围传输与本地持久化)
+  window.addEventListener('paste', e => {
+    if (state.editingId != null) return;
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.indexOf('image') !== -1) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+
+        const reader = new FileReader();
+        reader.onload = evt => {
+          const rawDataUrl = evt.target.result;
+          const img = new Image();
+          img.onload = () => {
+            // 对超大图片进行合理尺寸缩放限制（保持比例，便于快速 P2P 传输与存储）
+            const maxDim = 1200;
+            let targetW = img.naturalWidth;
+            let targetH = img.naturalHeight;
+            if (targetW > maxDim || targetH > maxDim) {
+              const ratio = Math.min(maxDim / targetW, maxDim / targetH);
+              targetW = Math.round(targetW * ratio);
+              targetH = Math.round(targetH * ratio);
+            }
+
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = targetW;
+            offCanvas.height = targetH;
+            const offCtx = offCanvas.getContext('2d');
+            offCtx.drawImage(img, 0, 0, targetW, targetH);
+            const optimizedDataUrl = offCanvas.toDataURL('image/jpeg', 0.85);
+
+            // 画布上显示的适中初始尺寸
+            const displayMax = 320;
+            let dw = targetW, dh = targetH;
+            if (dw > displayMax || dh > displayMax) {
+              const dRatio = Math.min(displayMax / dw, displayMax / dh);
+              dw = Math.round(dw * dRatio);
+              dh = Math.round(dh * dRatio);
+            }
+
+            // 放置在当前鼠标/光标世界坐标，或视口中心
+            const center = screenToWorld(state.W / 2, state.H / 2, state.view);
+            const posX = state.pointerWorld ? state.pointerWorld.x - dw / 2 : center.x - dw / 2;
+            const posY = state.pointerWorld ? state.pointerWorld.y - dh / 2 : center.y - dh / 2;
+
+            pushUndo();
+            const imageEl = {
+              id: uid(),
+              type: 'image',
+              x: posX,
+              y: posY,
+              w: dw,
+              h: dh,
+              dataUrl: optimizedDataUrl,
+              rev: 0
+            };
+            upsert(imageEl, true);
+            state.selectedId = imageEl.id;
+            selectTool('select');
+            toast('已粘贴图片');
+          };
+          img.src = rawDataUrl;
+        };
+        reader.readAsDataURL(file);
+        break;
+      }
     }
   });
 }

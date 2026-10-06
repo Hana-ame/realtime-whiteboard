@@ -14,6 +14,33 @@ export const NOTE_FONT = 16;
 let canvas, ctx, mm, mmx, stage;
 let renderQueued = false;
 
+// Image element cache: id -> HTMLImageElement
+const imageCache = {};
+
+/**
+ * Get or create a cached HTMLImageElement for an image element
+ * @param {Object} el - Image element with dataUrl
+ * @returns {HTMLImageElement}
+ */
+function getImageObj(el) {
+  const cached = imageCache[el.id];
+  if (cached && cached._dataUrl === el.dataUrl) return cached;
+  const img = new Image();
+  img._dataUrl = el.dataUrl;
+  img.src = el.dataUrl;
+  img.onload = () => requestRender();
+  imageCache[el.id] = img;
+  return img;
+}
+
+/**
+ * Remove cached image when element is deleted
+ * @param {string} id - Element id
+ */
+export function clearImageCache(id) {
+  delete imageCache[id];
+}
+
 export function initRenderer() {
   canvas = document.getElementById('board');
   ctx = canvas.getContext('2d');
@@ -66,6 +93,10 @@ function render() {
   }
   for (const id in state.elements) {
     const el = state.elements[id];
+    if (el.type === 'image') drawImageEl(el);
+  }
+  for (const id in state.elements) {
+    const el = state.elements[id];
     if (el.type === 'note') drawNote(el);
   }
 
@@ -85,8 +116,9 @@ function render() {
   }
   ctx.restore();
 
-  if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
-    drawSelection(state.elements[state.selectedId]);
+  const sel = state.selectedId && state.elements[state.selectedId];
+  if (sel && (sel.type === 'note' || sel.type === 'image')) {
+    drawSelection(sel);
   }
   drawPeerCursors();
 }
@@ -123,6 +155,28 @@ function roundRect(c, x, y, w, h, r) {
   c.arcTo(x, y + h, x, y, r);
   c.arcTo(x, y, x + w, y, r);
   c.closePath();
+}
+
+function drawImageEl(el) {
+  const img = getImageObj(el);
+  if (!img.complete || !img.naturalWidth) return;
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(20,24,40,.12)';
+  ctx.shadowBlur = 12;
+  ctx.shadowOffsetY = 4;
+  roundRect(ctx, el.x, el.y, el.w, el.h, 6);
+  ctx.clip();
+  ctx.drawImage(img, el.x, el.y, el.w, el.h);
+  ctx.restore();
+
+  // Subtle border
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0,0,0,.10)';
+  ctx.lineWidth = 1.5 / state.view.scale;
+  roundRect(ctx, el.x, el.y, el.w, el.h, 6);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawNote(n) {
@@ -277,6 +331,9 @@ function drawMinimap() {
     const el = state.elements[id];
     if (el.type === 'note') {
       mmx.fillStyle = el.color;
+      mmx.fillRect(tx(el.x), ty(el.y), el.w * sc, el.h * sc);
+    } else if (el.type === 'image') {
+      mmx.fillStyle = '#c8cdd8';
       mmx.fillRect(tx(el.x), ty(el.y), el.w * sc, el.h * sc);
     } else if (el.type === 'stroke') {
       mmx.strokeStyle = el.color;
