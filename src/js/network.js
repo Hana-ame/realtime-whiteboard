@@ -13,6 +13,21 @@ const seen = new Set();
 let lastCursor = 0;
 const _bcache = {};
 
+/**
+ * Connect to a remote peer ID
+ * @param {string} remoteId
+ */
+export function connectToPeer(remoteId) {
+  if (!remoteId || remoteId === myId) return;
+  if (!peer || !myId) {
+    toast('网络服务尚未就绪');
+    return;
+  }
+  if (conns[remoteId]) return;
+  const c = peer.connect(remoteId, { reliable: true });
+  setupConn(c);
+}
+
 export function initNetwork() {
   if (typeof Peer === 'undefined') {
     toast('PeerJS 未加载：需联网加载 CDN');
@@ -25,11 +40,28 @@ export function initNetwork() {
     document.getElementById('my-id').textContent = id;
     updateNetUI();
     broadcast({ t: 'presence', name: peerName, color: peerColor });
-    toast('已上线，复制ID发给对方即可互联');
+    toast('已上线，可邀请好友同屏协作');
+
+    // 检查 URL 中是否有加入房间的 hash（例如 #room=xxx 或 #xxx）
+    const hash = window.location.hash.replace(/^#/, '');
+    const match = hash.match(/(?:room=)?([a-zA-Z0-9_-]+)/);
+    if (match && match[1] && match[1] !== id) {
+      const targetRoomId = match[1];
+      const remoteInput = document.getElementById('remote-id');
+      if (remoteInput) remoteInput.value = targetRoomId;
+      toast('正在加入房间: ' + targetRoomId);
+      connectToPeer(targetRoomId);
+    }
   });
   
   peer.on('connection', conn => setupConn(conn));
-  peer.on('error', err => toast('Peer 错误: ' + err.type));
+  peer.on('error', err => {
+    if (err.type === 'peer-unavailable') {
+      toast('目标用户未在线或房间号不存在');
+    } else {
+      toast('网络提示: ' + err.type);
+    }
+  });
   peer.on('disconnected', () => { if (peer && !peer.destroyed) { try { peer.reconnect(); } catch (e) {} } });
   
   setInterval(() => {
@@ -58,17 +90,35 @@ export function initNetwork() {
 
   document.getElementById('copy-id').addEventListener('click', () => {
     if (myId && navigator.clipboard) {
-      navigator.clipboard.writeText(myId).then(() => toast('已复制我的ID')).catch(() => toast(myId));
+      navigator.clipboard.writeText(myId).then(() => toast('已复制我的ID: ' + myId)).catch(() => toast(myId));
     } else toast(myId || '');
   });
+
+  // 复制多人同屏房间链接
+  const shareBtn = document.getElementById('share-link-btn');
+  if (shareBtn) {
+    shareBtn.addEventListener('click', () => {
+      if (!myId) { toast('请等待连接建立'); return; }
+      const url = new URL(window.location.href);
+      url.hash = `room=${myId}`;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(url.toString()).then(() => {
+          toast('已复制同屏房间链接，发给好友直接加入！');
+        }).catch(() => {
+          toast(url.toString());
+        });
+      } else {
+        toast(url.toString());
+      }
+    });
+  }
+
   document.getElementById('connect-btn').addEventListener('click', () => {
     const v = document.getElementById('remote-id').value.trim();
     if (!v) return;
     if (v === myId) { toast('不能连接自己'); return; }
-    if (!peer || !myId) { toast('Peer 未就绪'); return; }
     if (conns[v]) { toast('已连接'); return; }
-    const c = peer.connect(v, { reliable: true });
-    setupConn(c);
+    connectToPeer(v);
     toast('正在连接…');
   });
   document.getElementById('remote-id').addEventListener('keydown', e => {
@@ -80,6 +130,14 @@ function setupConn(conn) {
   conns[conn.peer] = conn;
   conn.on('open', () => {
     updateNetUI();
+    // 告知新连接节点当前已知的其他节点列表，完成多人群组网状互联 (Full Mesh)
+    const existingPeers = Object.keys(conns).filter(p => p !== conn.peer);
+    if (existingPeers.length > 0) {
+      try {
+        conn.send({ t: 'peer_list', list: existingPeers });
+      } catch (e) {}
+    }
+
     broadcast({ t: 'request' });
     broadcast({ t: 'presence', name: peerName, color: peerColor });
   });
@@ -163,6 +221,13 @@ function handleMsg(m) {
     delete peers[m.from];
     updatePresence();
     requestRender();
+  } else if (m.t === 'peer_list' && Array.isArray(m.list)) {
+    // 自动连接房间内其它在线同屏成员，实现全网状拓扑
+    m.list.forEach(otherPeerId => {
+      if (otherPeerId && otherPeerId !== myId && !conns[otherPeerId]) {
+        connectToPeer(otherPeerId);
+      }
+    });
   }
 }
 
