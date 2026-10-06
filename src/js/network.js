@@ -1,6 +1,6 @@
 import { Peer } from 'peerjs';
 import { state, peers, peerId, peerName, peerColor, persist } from './state.js';
-import { uid, toast } from './utils.js';
+import { uid, toast, deepCopy } from './utils.js';
 import { requestRender } from './renderer.js';
 
 let peer = null;
@@ -22,7 +22,7 @@ export function connectToPeer(remoteId) {
   }
   if (conns[remoteId]) return;
   const c = peer.connect(remoteId, { reliable: true });
-  setupConn(c);
+  setupConn(c, true);
 }
 
 export function initNetwork() {
@@ -52,8 +52,20 @@ export function initNetwork() {
       connectToPeer(targetRoomId);
     }
   });
+
+  window.addEventListener('hashchange', () => {
+    const hash = window.location.hash.replace(/^#/, '');
+    const match = hash.match(/(?:room=)?([a-zA-Z0-9_-]+)/);
+    if (match && match[1] && match[1] !== myId && !conns[match[1]]) {
+      const targetRoomId = match[1];
+      const remoteInput = document.getElementById('remote-id');
+      if (remoteInput) remoteInput.value = targetRoomId;
+      toast('正在加入房间: ' + targetRoomId);
+      connectToPeer(targetRoomId);
+    }
+  });
   
-  peer.on('connection', conn => setupConn(conn));
+  peer.on('connection', conn => setupConn(conn, false));
   peer.on('error', err => {
     if (err.type === 'peer-unavailable') {
       toast('目标用户未在线或房间号不存在');
@@ -128,7 +140,7 @@ export function initNetwork() {
   });
 }
 
-function setupConn(conn) {
+function setupConn(conn, isInitiator = false) {
   conns[conn.peer] = conn;
   conn.on('open', () => {
     updateNetUI();
@@ -140,7 +152,11 @@ function setupConn(conn) {
       } catch (e) {}
     }
 
-    broadcast({ t: 'request' });
+    if (isInitiator) {
+      try {
+        conn.send({ t: 'request' });
+      } catch (e) {}
+    }
     broadcast({ t: 'presence', name: peerName, color: peerColor });
   });
   conn.on('data', m => {
@@ -150,7 +166,7 @@ function setupConn(conn) {
       seen.add(m.mid);
       if (seen.size > 3000) seen.clear();
     }
-    handleMsg(m);
+    handleMsg(m, conn);
     relay(m, conn.peer);
   });
   conn.on('close', () => {
@@ -187,30 +203,55 @@ function relay(msg, exceptId) {
   }
 }
 
-function handleMsg(m) {
+function handleMsg(m, conn) {
   if (m.t === 'upsert') {
     const el = m.el;
+    if (!el || !el.id) return;
+    // Don't let remote live-move overwrite what this user is actively dragging locally
+    if (state.drag && state.drag.id === el.id && el._isLiveMove) {
+      return;
+    }
     const cur = state.elements[el.id];
-    if (!cur || (el.rev || 0) >= (cur.rev || 0)) {
+    // Preserve heavy image dataUrl if stripped during live drag
+    if (cur && cur.type === 'image' && cur.dataUrl && !el.dataUrl) {
+      el.dataUrl = cur.dataUrl;
+    }
+    // Accept if it's a live move, or no local element, or incoming rev is >= local rev
+    if (!cur || el._isLiveMove || (el.rev || 0) >= (cur.rev || 0)) {
+      if (cur && (cur.rev || 0) > (el.rev || 0)) {
+        el.rev = cur.rev;
+      }
       state.elements[el.id] = el;
+      if (!el._isLiveMove) persist();
       requestRender();
     }
   } else if (m.t === 'delete') {
     if (state.elements[m.id]) {
       delete state.elements[m.id];
       if (state.selectedId === m.id) state.selectedId = null;
+      persist();
       requestRender();
     }
   } else if (m.t === 'state') {
-    for (const id in m.elements) {
-      const el = m.elements[id];
-      const cur = state.elements[id];
-      if (!cur || (el.rev || 0) >= (cur.rev || 0)) state.elements[id] = el;
+    if (m.fullSync) {
+      state.elements = m.elements || {};
+    } else {
+      for (const id in m.elements) {
+        const el = m.elements[id];
+        const cur = state.elements[id];
+        if (!cur || (el.rev || 0) >= (cur.rev || 0)) state.elements[id] = el;
+      }
     }
     persist();
     requestRender();
   } else if (m.t === 'request') {
-    broadcast({ t: 'state', elements: state.elements });
+    if (conn && conn.open) {
+      try {
+        conn.send({ t: 'state', elements: state.elements, fullSync: true });
+      } catch (e) {}
+    } else {
+      broadcast({ t: 'state', elements: state.elements, fullSync: true });
+    }
   } else if (m.t === 'cursor') {
     peers[m.from] = { name: m.name, color: m.color, cursor: { x: m.x, y: m.y }, last: performance.now() };
     updatePresence();
@@ -240,17 +281,63 @@ export function broadcastCursor(wp) {
   broadcast({ t: 'cursor', name: peerName, color: peerColor, x: wp.x, y: wp.y });
 }
 
-export function broadcastThrottled(el) {
-  const now = performance.now();
-  const c = _bcache[el.id];
-  if (c && now - c.t < 60) {
-    c.el = el;
-    clearTimeout(c.to);
-    c.to = setTimeout(() => { broadcast({ t: 'upsert', el: c.el }); }, 60);
-    return;
+/**
+ * Clear pending throttled timer for an element (e.g. on pointerup)
+ * @param {string} id
+ */
+export function clearThrottled(id) {
+  const c = _bcache[id];
+  if (c) {
+    if (c.timer) clearTimeout(c.timer);
+    delete _bcache[id];
   }
-  _bcache[el.id] = { t: now, el: el, to: null };
-  broadcast({ t: 'upsert', el: el });
+}
+
+/**
+ * Throttled broadcast for real-time live drag / draw updates
+ * @param {Object} el
+ */
+export function broadcastThrottled(el) {
+  if (!el || !el.id) return;
+  const now = performance.now();
+  let c = _bcache[el.id];
+  if (!c) {
+    _bcache[el.id] = c = { lastTime: 0, timer: null, payload: null };
+  }
+
+  // Strip heavy image base64 dataUrl during real-time movement frames
+  let payload;
+  if (el.type === 'image' && el.dataUrl) {
+    payload = { ...el };
+    delete payload.dataUrl;
+    payload._isLiveMove = true;
+  } else {
+    payload = deepCopy(el);
+    payload._isLiveMove = true;
+  }
+  c.payload = payload;
+
+  const interval = 25; // ~40 fps ultra-responsive
+  const elapsed = now - c.lastTime;
+
+  if (elapsed >= interval) {
+    c.lastTime = now;
+    if (c.timer) {
+      clearTimeout(c.timer);
+      c.timer = null;
+    }
+    broadcast({ t: 'upsert', el: c.payload });
+    c.payload = null;
+  } else if (!c.timer) {
+    c.timer = setTimeout(() => {
+      c.timer = null;
+      c.lastTime = performance.now();
+      if (c.payload) {
+        broadcast({ t: 'upsert', el: c.payload });
+        c.payload = null;
+      }
+    }, interval - elapsed);
+  }
 }
 
 function updateNetUI() {

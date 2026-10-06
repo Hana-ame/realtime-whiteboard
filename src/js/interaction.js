@@ -7,7 +7,7 @@ import { state, pushUndo, removeEl, upsert, undo, redo } from './state.js';
 import { screenToWorld, worldToScreen, uid, clamp, toast } from './utils.js';
 import { requestRender, NOTE_FONT, clearImageCache } from './renderer.js';
 import { openEditor, closeEditor } from './editor.js';
-import { broadcastCursor, broadcastThrottled } from './network.js';
+import { broadcastCursor, broadcastThrottled, clearThrottled } from './network.js';
 import { selectTool, updateZoomLabel } from './toolbar.js';
 
 export const NOTE_W = 170;
@@ -344,12 +344,21 @@ export function initInteraction() {
   canvas.addEventListener('pointerup', e => {
     if (!state.drag) return;
     const mode = state.drag.mode;
+    const dragId = state.drag.id;
+    const moved = state.drag.moved;
+
+    if (dragId) {
+      clearThrottled(dragId);
+    }
+
     if (mode === 'draw') {
-      const s = state.elements[state.drag.id];
+      const s = state.elements[dragId];
       if (s) upsert(s);
     } else if (mode === 'move' || mode === 'move-el' || mode === 'resize') {
-      const el = state.elements[state.drag.id];
-      if (el) upsert(el);
+      const el = state.elements[dragId];
+      if (el && moved) {
+        upsert(el);
+      }
     } else if (mode === 'connect') {
       const sp = getPos(e, canvas);
       const wp = screenToWorld(sp.x, sp.y, state.view);
@@ -364,6 +373,15 @@ export function initInteraction() {
     state.drag = null;
     stage.classList.remove('panning');
     requestRender();
+  });
+
+  canvas.addEventListener('pointercancel', () => {
+    if (state.drag) {
+      if (state.drag.id) clearThrottled(state.drag.id);
+      state.drag = null;
+      stage.classList.remove('panning');
+      requestRender();
+    }
   });
 
   canvas.addEventListener('dblclick', e => {

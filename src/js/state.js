@@ -69,7 +69,7 @@ export function undo() {
   state.elements = undoStack.pop();
   state.selectedId = null;
   persist();
-  if (_broadcastFn) _broadcastFn({t: 'state', elements: state.elements});
+  if (_broadcastFn) _broadcastFn({ t: 'state', elements: state.elements, fullSync: true });
   if (_requestRenderFn) _requestRenderFn();
   toast('已撤销');
 }
@@ -83,7 +83,7 @@ export function redo() {
   state.elements = redoStack.pop();
   state.selectedId = null;
   persist();
-  if (_broadcastFn) _broadcastFn({t: 'state', elements: state.elements});
+  if (_broadcastFn) _broadcastFn({ t: 'state', elements: state.elements, fullSync: true });
   if (_requestRenderFn) _requestRenderFn();
   toast('已重做');
 }
@@ -94,11 +94,13 @@ export function redo() {
  * @param {boolean} doBroadcast 
  */
 export function upsert(el, doBroadcast = true) {
-  el.rev = el.rev || 0;
-  el.rev++;
+  const cur = state.elements[el.id];
+  el.rev = Math.max(el.rev || 0, cur?.rev || 0) + 1;
+  el.updatedAt = Date.now();
+  delete el._isLiveMove;
   state.elements[el.id] = el;
   persist();
-  if (doBroadcast && _broadcastFn) _broadcastFn({t: 'upsert', el: el});
+  if (doBroadcast && _broadcastFn) _broadcastFn({ t: 'upsert', el: el });
   if (_requestRenderFn) _requestRenderFn();
 }
 
