@@ -61,8 +61,11 @@ export function initToolbar() {
   document.getElementById('zoom-out').addEventListener('click', () => zoomBy(1 / 1.2));
   document.getElementById('zoom-reset').addEventListener('click', () => {
     state.view.scale = 1;
+    state.view.x = state.W / 2;
+    state.view.y = state.H / 2;
     updateZoomLabel();
     requestRender();
+    toast('已重置视图至中心 100%');
   });
   document.getElementById('fit').addEventListener('click', fitToContent);
 

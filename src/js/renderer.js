@@ -316,9 +316,17 @@ function drawMinimap() {
   mmx.fillStyle = '#fbfcfe';
   mmx.fillRect(0, 0, mw, mh);
   
-  const b = contentBounds();
-  const cw = b.maxX - b.minX;
-  const ch = b.maxY - b.minY;
+  const cb = contentBounds();
+  const vx0 = screenToWorld(0, 0, state.view);
+  const vx1 = screenToWorld(state.W, state.H, state.view);
+  const b = {
+    minX: Math.min(cb.minX, vx0.x) - 40,
+    minY: Math.min(cb.minY, vx0.y) - 40,
+    maxX: Math.max(cb.maxX, vx1.x) + 40,
+    maxY: Math.max(cb.maxY, vx1.y) + 40
+  };
+  const cw = Math.max(10, b.maxX - b.minX);
+  const ch = Math.max(10, b.maxY - b.minY);
   const sc = Math.min(mw / cw, mh / ch);
   const ox = (mw - cw * sc) / 2;
   const oy = (mh - ch * sc) / 2;
@@ -343,8 +351,6 @@ function drawMinimap() {
       mmx.stroke();
     }
   }
-  const vx0 = screenToWorld(0, 0, state.view);
-  const vx1 = screenToWorld(state.W, state.H, state.view);
   mmx.strokeStyle = '#4c8bf5';
   mmx.lineWidth = 1.5;
   mmx.strokeRect(tx(vx0.x), ty(vx0.y), (vx1.x - vx0.x) * sc, (vx1.y - vx0.y) * sc);

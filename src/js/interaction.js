@@ -125,25 +125,7 @@ export function contentBounds() {
     maxY = Math.max(maxY, y1);
     has = true;
   }
-
-  // 将当前视口范围也纳入计算，确保用户平移/缩放时迷你地图实时跟随视口动态映射
-  const vx0 = -state.view.x / state.view.scale;
-  const vy0 = -state.view.y / state.view.scale;
-  const vx1 = (state.W - state.view.x) / state.view.scale;
-  const vy1 = (state.H - state.view.y) / state.view.scale;
-
-  if (!has) {
-    minX = vx0;
-    minY = vy0;
-    maxX = vx1;
-    maxY = vy1;
-  } else {
-    minX = Math.min(minX, vx0);
-    minY = Math.min(minY, vy0);
-    maxX = Math.max(maxX, vx1);
-    maxY = Math.max(maxY, vy1);
-  }
-
+  if (!has) return { minX: -state.W / 2, minY: -state.H / 2, maxX: state.W / 2, maxY: state.H / 2 };
   const pad = 80;
   return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
 }
@@ -408,12 +390,22 @@ export function initInteraction() {
   stage.addEventListener('wheel', e => {
     e.preventDefault();
     const sp = getPos(e, canvas);
-    const before = screenToWorld(sp.x, sp.y, state.view);
-    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-    state.view.scale = clamp(state.view.scale * factor, 0.15, 6);
-    state.view.x = sp.x - before.x * state.view.scale;
-    state.view.y = sp.y - before.y * state.view.scale;
-    updateZoomLabel();
+
+    // 如果是触摸板双指平移（无 ctrlKey 且没有大步阶跳跃）
+    if (e.ctrlKey || e.metaKey || Math.abs(e.deltaY) >= 40) {
+      // 缩放模式：以当前鼠标光标所在的世界坐标为锚点进行平滑缩放
+      const before = screenToWorld(sp.x, sp.y, state.view);
+      const zoomFactor = Math.exp(-e.deltaY * 0.0025);
+      const newScale = clamp(state.view.scale * zoomFactor, 0.15, 6);
+      state.view.scale = newScale;
+      state.view.x = sp.x - before.x * newScale;
+      state.view.y = sp.y - before.y * newScale;
+      updateZoomLabel();
+    } else {
+      // 双指平移模式（跟手平滑平移）
+      state.view.x -= e.deltaX;
+      state.view.y -= e.deltaY;
+    }
     requestRender();
   }, { passive: false });
 
