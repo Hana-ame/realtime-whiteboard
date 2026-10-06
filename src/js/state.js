@@ -111,6 +111,20 @@ export function removeEl(id, doBroadcast = true) {
   if (!state.elements[id]) return;
   delete state.elements[id];
   if (state.selectedId === id) state.selectedId = null;
+
+  // 同时清理与该元素关联的所有连线
+  const linkedConnections = [];
+  for (const key in state.elements) {
+    const el = state.elements[key];
+    if (el && el.type === 'connection' && (el.from === id || el.to === id)) {
+      linkedConnections.push(key);
+    }
+  }
+  linkedConnections.forEach(connId => {
+    delete state.elements[connId];
+    if (doBroadcast && _broadcastFn) _broadcastFn({t: 'delete', id: connId});
+  });
+
   persist();
   if (doBroadcast && _broadcastFn) _broadcastFn({t: 'delete', id: id});
   if (_requestRenderFn) _requestRenderFn();

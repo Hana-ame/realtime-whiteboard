@@ -212,7 +212,16 @@ export function initInteraction() {
       const hk = hitHandle(hit, sp);
       if (hk) {
         pushUndo();
-        state.drag = { mode: 'resize', id: hit.id, hk: hk, sx: wp.x, sy: wp.y };
+        state.drag = {
+          mode: 'resize',
+          id: hit.id,
+          hk: hk,
+          origX: hit.x,
+          origY: hit.y,
+          origW: hit.w,
+          origH: hit.h,
+          startWp: { x: wp.x, y: wp.y }
+        };
         return;
       }
     }
@@ -275,13 +284,42 @@ export function initInteraction() {
     if (state.drag.mode === 'resize') {
       const n = state.elements[state.drag.id];
       if (!n) return;
-      const hk = state.drag.hk;
-      let nx = n.x, ny = n.y, nw = n.w, nh = n.h;
-      if (hk.includes('w')) { nx = wp.x; nw = n.x + n.w - wp.x; }
-      if (hk.includes('e')) { nw = wp.x - n.x; }
-      if (hk.includes('n')) { ny = wp.y; nh = n.y + n.h - wp.y; }
-      if (hk.includes('s')) { nh = wp.y - n.y; }
-      n.x = nx; n.y = ny; n.w = Math.max(40, nw); n.h = Math.max(40, nh);
+      const { hk, origX, origY, origW, origH, startWp } = state.drag;
+      const dx = wp.x - startWp.x;
+      const dy = wp.y - startWp.y;
+
+      let nx = origX, ny = origY, nw = origW, nh = origH;
+
+      if (hk.includes('e')) {
+        nw = Math.max(40, origW + dx);
+      } else if (hk.includes('w')) {
+        const potentialW = origW - dx;
+        if (potentialW >= 40) {
+          nx = origX + dx;
+          nw = potentialW;
+        } else {
+          nx = origX + origW - 40;
+          nw = 40;
+        }
+      }
+
+      if (hk.includes('s')) {
+        nh = Math.max(40, origH + dy);
+      } else if (hk.includes('n')) {
+        const potentialH = origH - dy;
+        if (potentialH >= 40) {
+          ny = origY + dy;
+          nh = potentialH;
+        } else {
+          ny = origY + origH - 40;
+          nh = 40;
+        }
+      }
+
+      n.x = Math.round(nx);
+      n.y = Math.round(ny);
+      n.w = Math.round(nw);
+      n.h = Math.round(nh);
       state.elements[n.id] = n;
       broadcastThrottled(n);
       requestRender();
