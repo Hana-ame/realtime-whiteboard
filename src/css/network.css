@@ -1,0 +1,14 @@
+.presence{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);}
+.avatars{display:flex;}
+.av{width:24px;height:24px;border-radius:50%;margin-left:-7px;border:2px solid var(--bar);
+    display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;font-weight:600;}
+.av:first-child{margin-left:0;}
+
+.net{display:flex;align-items:center;gap:6px;}
+.net-id{font-size:11px;color:var(--muted);max-width:132px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  background:var(--bar-2);padding:5px 9px;border-radius:7px;border:1px solid var(--bar-line);}
+.rid{width:96px;height:30px;background:var(--bar-2);border:1px solid var(--bar-line);color:var(--txt);
+  border-radius:7px;padding:0 8px;font-size:12px;outline:none;}
+.rid:focus{border-color:var(--accent);}
+.net-count{font-size:11px;color:var(--muted);white-space:nowrap;}
+.tool.mini{height:30px;padding:0 12px;font-size:12px;}

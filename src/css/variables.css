@@ -1,0 +1,13 @@
+:root{
+  --bar:#1f2330;
+  --bar-2:#272c3b;
+  --bar-line:#343a4d;
+  --txt:#e8eaf0;
+  --muted:#9aa0b4;
+  --accent:#4c8bf5;
+  --panel:#ffffff;
+  --grid:#eef0f4;
+  --grid-strong:#e3e6ee;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:#fff;color:#1c1f2b;}

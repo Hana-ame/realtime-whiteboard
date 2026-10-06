@@ -1,0 +1,17 @@
+{
+  "name": "realtime-whiteboard",
+  "version": "1.0.0",
+  "description": "Real-time collaborative whiteboard",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "peerjs": "^1.5.4"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}

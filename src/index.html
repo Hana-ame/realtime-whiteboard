@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>实时协作白板 · 原型</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<link rel="stylesheet" href="./css/variables.css" />
+<link rel="stylesheet" href="./css/layout.css" />
+<link rel="stylesheet" href="./css/toolbar.css" />
+<link rel="stylesheet" href="./css/canvas.css" />
+<link rel="stylesheet" href="./css/network.css" />
+</head>
+<body>
+<div id="app">
+  <!-- 顶栏 -->
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span>协作白板 <small>Realtime Whiteboard</small></div>
+
+    <div class="tools" id="tools">
+      <button class="tool active" data-tool="select" title="选择 (V)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 3l7 17 2.5-7L20 10z" stroke-linejoin="round"/></svg>选择 <kbd>V</kbd>
+      </button>
+      <button class="tool" data-tool="note" title="便签 (N)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 4h14v10l-5 5H5z" stroke-linejoin="round"/><path d="M14 19v-5h5"/></svg>便签 <kbd>N</kbd>
+      </button>
+      <button class="tool" data-tool="pen" title="画笔 (P)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20l4-1L20 7l-3-3L5 16z" stroke-linejoin="round"/><path d="M14 6l4 4"/></svg>画笔 <kbd>P</kbd>
+      </button>
+      <button class="tool" data-tool="connect" title="连线 (L)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="18" r="2.4"/><path d="M8 8l8 8"/></svg>连线 <kbd>L</kbd>
+      </button>
+      <button class="tool" data-tool="pan" title="平移 (H / 空格)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11V5m0 0L6 8m3-3l3 3M15 13v6m0 0l3-3m-3 3l-3-3M4 11h6m4 0h6" stroke-linecap="round"/></svg>平移 <kbd>H</kbd>
+      </button>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- 便签颜色（便签工具时显示） -->
+    <div class="ctx" id="ctx-note">
+      <div class="swatches" id="note-swatches"></div>
+    </div>
+    <!-- 画笔设置（画笔工具时显示） -->
+    <div class="ctx hidden" id="ctx-pen">
+      <div class="swatches" id="pen-swatches"></div>
+      <input type="color" id="pen-color" value="#e23b3b" title="自定义颜色"/>
+      <label>粗细 <input type="range" id="pen-size" min="1" max="24" value="4"/><span id="pen-size-val">4</span></label>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="presence">
+      <div class="avatars" id="avatars"></div>
+      <span id="online-count">1 人在线</span>
+    </div>
+
+    <div class="net">
+      <span class="net-id" id="my-id" title="我的连接ID（发给对方即可互联）">连接中…</span>
+      <button class="iconbtn" id="copy-id" title="复制我的ID">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+      </button>
+      <input id="remote-id" class="rid" placeholder="对方ID" />
+      <button class="tool mini" id="connect-btn">连接</button>
+      <span id="net-count" class="net-count">未连接</span>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="zoom">
+      <button class="zbtn" id="zoom-out" title="缩小">−</button>
+      <button class="zval" id="zoom-reset" title="重置视图">100%</button>
+      <button class="zbtn" id="zoom-in" title="放大">+</button>
+      <button class="iconbtn" id="fit" title="适应内容">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- 画布 -->
+  <div class="stage" id="stage">
+    <canvas id="board"></canvas>
+    <textarea id="editor" spellcheck="false"></textarea>
+
+    <div class="minimap" id="minimap">
+      <span class="mm-title">迷你地图</span>
+      <canvas id="mm"></canvas>
+    </div>
+
+    <div class="hint">
+      <b>提示</b>：拖空白处平移 · 滚轮缩放 · 双击便签编辑<br>
+      便签：右键删除 / 顶部换色 · <kbd>Del</kbd> 删除选中<br>
+      联机：点 <b>复制ID</b> 发给对方，或粘贴对方ID点 <b>连接</b>
+    </div>
+    <div class="toast" id="toast"></div>
+  </div>
+</div>
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
