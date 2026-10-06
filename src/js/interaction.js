@@ -125,7 +125,25 @@ export function contentBounds() {
     maxY = Math.max(maxY, y1);
     has = true;
   }
-  if (!has) return { minX: -state.W / 2, minY: -state.H / 2, maxX: state.W / 2, maxY: state.H / 2 };
+
+  // 将当前视口范围也纳入计算，确保用户平移/缩放时迷你地图实时跟随视口动态映射
+  const vx0 = -state.view.x / state.view.scale;
+  const vy0 = -state.view.y / state.view.scale;
+  const vx1 = (state.W - state.view.x) / state.view.scale;
+  const vy1 = (state.H - state.view.y) / state.view.scale;
+
+  if (!has) {
+    minX = vx0;
+    minY = vy0;
+    maxX = vx1;
+    maxY = vy1;
+  } else {
+    minX = Math.min(minX, vx0);
+    minY = Math.min(minY, vy0);
+    maxX = Math.max(maxX, vx1);
+    maxY = Math.max(maxY, vy1);
+  }
+
   const pad = 80;
   return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
 }

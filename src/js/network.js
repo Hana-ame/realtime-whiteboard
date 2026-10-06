@@ -37,7 +37,8 @@ export function initNetwork() {
   
   peer.on('open', id => {
     myId = id;
-    document.getElementById('my-id').textContent = id;
+    const myIdEl = document.getElementById('my-id');
+    if (myIdEl) myIdEl.textContent = '房间: ' + id;
     updateNetUI();
     broadcast({ t: 'presence', name: peerName, color: peerColor });
     toast('已上线，可邀请好友同屏协作');
@@ -254,7 +255,7 @@ export function broadcastThrottled(el) {
 function updateNetUI() {
   const n = Object.keys(conns).length;
   const el = document.getElementById('net-count');
-  if (el) el.textContent = n ? ('已连接 ' + n) : '未连接';
+  if (el) el.textContent = n ? (`同屏中: ${n + 1}人`) : '单人模式';
 }
 
 export function updatePresence() {

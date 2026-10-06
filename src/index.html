@@ -35,17 +35,17 @@
       </button>
     </div>
 
-    <div class="sep"></div>
-
-    <!-- 便签颜色（便签工具时显示） -->
-    <div class="ctx" id="ctx-note">
-      <div class="swatches" id="note-swatches"></div>
-    </div>
-    <!-- 画笔设置（画笔工具时显示） -->
-    <div class="ctx hidden" id="ctx-pen">
-      <div class="swatches" id="pen-swatches"></div>
-      <input type="color" id="pen-color" value="#e23b3b" title="自定义颜色"/>
-      <label>粗细 <input type="range" id="pen-size" min="1" max="24" value="4"/><span id="pen-size-val">4</span></label>
+    <div class="ctx-container">
+      <!-- 便签颜色（便签工具时显示） -->
+      <div class="ctx" id="ctx-note">
+        <div class="swatches" id="note-swatches"></div>
+      </div>
+      <!-- 画笔设置（画笔工具时显示） -->
+      <div class="ctx hidden" id="ctx-pen">
+        <div class="swatches" id="pen-swatches"></div>
+        <input type="color" id="pen-color" value="#e23b3b" title="自定义颜色"/>
+        <label>粗细 <input type="range" id="pen-size" min="1" max="24" value="4"/><span id="pen-size-val">4</span></label>
+      </div>
     </div>
 
     <div class="spacer"></div>
@@ -56,16 +56,13 @@
     </div>
 
     <div class="net">
-      <span class="net-id" id="my-id" title="我的连接ID（发给对方即可互联）">连接中…</span>
-      <button class="iconbtn" id="copy-id" title="复制我的ID">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
-      </button>
-      <button class="iconbtn" id="share-link-btn" title="复制多人协作房间链接（好友打开直接同屏）">
+      <span class="net-id" id="my-id" title="当前房间ID（发给好友即可加入同屏）">房间: 连接中…</span>
+      <button class="iconbtn" id="share-link-btn" title="复制多人同屏房间链接">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
       </button>
-      <input id="remote-id" class="rid" placeholder="对方ID" />
-      <button class="tool mini" id="connect-btn">连接</button>
-      <span id="net-count" class="net-count">未连接</span>
+      <input id="remote-id" class="rid" placeholder="输入房间ID" />
+      <button class="tool mini" id="connect-btn">加入房间</button>
+      <span id="net-count" class="net-count">单人模式</span>
     </div>
 
     <div class="sep"></div>
@@ -90,7 +87,8 @@
       <canvas id="mm"></canvas>
     </div>
 
-    <div class="hint">
+    <div class="hint" id="hint-box">
+      <button class="hint-close" id="hint-close-btn" title="关闭提示">×</button>
       <b>提示</b>：拖空白处平移 · 滚轮缩放 · 双击便签编辑<br>
       图片：支持 <kbd>Ctrl+V</kbd> 直接粘贴图片 (P2P同步)<br>
       便签：右键删除 / 顶部换色 · <kbd>Del</kbd> 删除选中<br>

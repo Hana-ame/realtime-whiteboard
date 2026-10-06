@@ -65,6 +65,19 @@ export function initToolbar() {
     requestRender();
   });
   document.getElementById('fit').addEventListener('click', fitToContent);
+
+  // 提示框关闭逻辑
+  const hintBox = document.getElementById('hint-box');
+  const hintCloseBtn = document.getElementById('hint-close-btn');
+  if (hintBox && hintCloseBtn) {
+    if (localStorage.getItem('wb-hint-dismissed') === '1') {
+      hintBox.style.display = 'none';
+    }
+    hintCloseBtn.addEventListener('click', () => {
+      hintBox.style.display = 'none';
+      try { localStorage.setItem('wb-hint-dismissed', '1'); } catch (e) {}
+    });
+  }
 }
 
 export function selectTool(t) {

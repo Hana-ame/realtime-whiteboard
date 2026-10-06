@@ -10,7 +10,8 @@
 .tool kbd{font-size:10px;color:var(--muted);background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;}
 .tool.active kbd{color:#7a8094;background:#eef0f4;}
 
-.ctx{display:flex;align-items:center;gap:8px;}
+.ctx-container{display:flex;align-items:center;min-width:0;}
+.ctx{display:flex;align-items:center;gap:8px;padding-left:10px;border-left:1px solid var(--bar-line);margin-left:4px;}
 .ctx.hidden{display:none;}
 .swatches{display:flex;gap:5px;}
 .sw{width:22px;height:22px;border-radius:6px;cursor:pointer;border:2px solid transparent;transition:transform .1s;}
