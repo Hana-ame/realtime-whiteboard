@@ -1,7 +1,4 @@
-/**
- * Networking and presence
- * @module network
- */
+import { Peer } from 'peerjs';
 import { state, peers, peerId, peerName, peerColor, persist } from './state.js';
 import { uid, toast } from './utils.js';
 import { requestRender } from './renderer.js';
@@ -29,11 +26,12 @@ export function connectToPeer(remoteId) {
 }
 
 export function initNetwork() {
-  if (typeof Peer === 'undefined') {
-    toast('PeerJS 未加载：需联网加载 CDN');
+  try {
+    peer = new Peer();
+  } catch (e) {
+    toast('无法创建网络连接');
     return;
   }
-  try { peer = new Peer(); } catch (e) { toast('无法创建 Peer'); return; }
   
   peer.on('open', id => {
     myId = id;
@@ -89,11 +87,14 @@ export function initNetwork() {
     }
   }, 5000);
 
-  document.getElementById('copy-id').addEventListener('click', () => {
-    if (myId && navigator.clipboard) {
-      navigator.clipboard.writeText(myId).then(() => toast('已复制我的ID: ' + myId)).catch(() => toast(myId));
-    } else toast(myId || '');
-  });
+  const copyBtn = document.getElementById('copy-id');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      if (myId && navigator.clipboard) {
+        navigator.clipboard.writeText(myId).then(() => toast('已复制我的ID: ' + myId)).catch(() => toast(myId));
+      } else toast(myId || '');
+    });
+  }
 
   // 复制多人同屏房间链接
   const shareBtn = document.getElementById('share-link-btn');
