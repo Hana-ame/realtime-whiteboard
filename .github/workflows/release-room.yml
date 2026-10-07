@@ -35,18 +35,14 @@ concurrency:
   group: room-release-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
+# 版本号只解析一次，避免 build 矩阵的 6 个实例并发写 GITHUB_OUTPUT 产生竞争。
+# 规则：手动输入 > tag 名 > dev-<run#>-<sha7>。is_release 决定要不要真正建 Release。
+# 注意：这些键必须放在 env: 下面——GitHub 对 workflow 顶层做严格 schema 校验，
+# 未知顶层键会让整份 workflow 解析失败（表现为 run 无任何 job 直接 failure）。
 env:
   GO_VERSION: '1.22.x'
-
-# 版本号只在 workflow 顶层解析一次，避免 build 矩阵的 6 个实例并发写
-# GITHUB_OUTPUT 产生竞争。规则：手动输入 > tag 名 > dev-<run#>-<sha7>。
-# 同时得出 is_release，决定要不要真正建 GitHub Release。
-res_version: >-
-  ${{ github.event_name == 'workflow_dispatch' && inputs.version ||
-        (startsWith(github.ref, 'refs/tags/v') && github.ref_name ||
-         format('dev-{0}-{1}', github.run_number, github.sha)) }}
-res_is_release: >-
-  ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+  res_version: ${{ github.event_name == 'workflow_dispatch' && inputs.version || startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}-{1}', github.run_number, github.sha) }}
+  res_is_release: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
   build:
@@ -84,21 +80,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            V="${{ inputs.version }}"
-          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            V="${GITHUB_REF#refs/tags/}"
-          else
-            V="dev-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
-          fi
-          V="${V#v}"
-          echo "version=$V" >> "$GITHUB_ENV"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "is_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "==> 版本 v${{ env.res_version }}（is_release=${{ env.res_is_release }}，ref=${GITHUB_REF}）"
 
       - name: Tidy, vet, test
         working-directory: room-go
