@@ -57,11 +57,16 @@ export function initToolbar() {
     document.getElementById('pen-size-val').textContent = state.penSize;
   });
 
-  // Note font size (per-note, synced with selection)
+  // Note font size (per-note, log scale 10→960)
+  const FS_MIN = 10, FS_MAX = 960, FS_LOG = Math.log(FS_MAX / FS_MIN);
   const fsSlider = document.getElementById('note-font-size');
   const fsVal = document.getElementById('note-font-size-val');
+  const fsToSlider = (fs) => Math.round(100 * Math.log(Math.max(FS_MIN, fs) / FS_MIN) / FS_LOG);
+  const sliderToFs = (v) => Math.round(FS_MIN * Math.pow(FS_MAX / FS_MIN, v / 100));
+  fsSlider.value = fsToSlider(state.noteFontSize);
+  fsVal.textContent = state.noteFontSize;
   fsSlider.addEventListener('input', e => {
-    const size = +e.target.value;
+    const size = sliderToFs(+e.target.value);
     state.noteFontSize = size;
     fsVal.textContent = size;
     if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
@@ -144,12 +149,13 @@ export function selectTool(t) {
 export function updateDeleteBtn() {
   const btn = document.getElementById('delete-btn');
   if (btn) btn.style.display = state.selectedId ? '' : 'none';
-  // Sync font size slider with selected note
+  // Sync font size slider with selected note (log scale)
   const el = state.selectedId ? state.elements[state.selectedId] : null;
   if (el && el.type === 'note') {
     const fs = el.fontSize || 16;
     state.noteFontSize = fs;
-    document.getElementById('note-font-size').value = fs;
+    const FS_MIN = 10, FS_MAX = 960, FS_LOG = Math.log(FS_MAX / FS_MIN);
+    document.getElementById('note-font-size').value = Math.round(100 * Math.log(Math.max(FS_MIN, fs) / FS_MIN) / FS_LOG);
     document.getElementById('note-font-size-val').textContent = fs;
   }
   // Toggle empty state on ctx-bar

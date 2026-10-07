@@ -180,6 +180,20 @@ export function initInteraction() {
       }
     }
 
+    // Auto-select note on click (except pen/connect which have their own note handling)
+    if (state.tool !== 'pen' && state.tool !== 'connect') {
+      const hit = pick(wp);
+      if (hit && hit.type === 'note') {
+        state.selectedId = hit.id;
+        updateDeleteBtn();
+        selectTool('select');
+        pushUndo();
+        state.drag = { mode: 'move', id: hit.id, dx: wp.x - hit.x, dy: wp.y - hit.y, moved: false, pointerId: e.pointerId };
+        requestRender();
+        return;
+      }
+    }
+
     if (state.tool === 'note') {
       const hit = pick(wp);
       if (hit && hit.type === 'note') {
