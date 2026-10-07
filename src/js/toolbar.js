@@ -57,6 +57,37 @@ export function initToolbar() {
     document.getElementById('pen-size-val').textContent = state.penSize;
   });
 
+  // Note font size
+  document.getElementById('note-font-size').addEventListener('input', e => {
+    state.noteFontSize = +e.target.value;
+    document.getElementById('note-font-size-val').textContent = state.noteFontSize;
+    if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
+      pushUndo();
+      upsert(state.elements[state.selectedId]);
+    }
+    requestRender();
+  });
+
+  // Connection color swatches
+  const CONN_COLORS = ['#9aa0b4','#e23b3b','#1f8a4c','#2b6fe2','#f59e0b','#8b3bd6','#1c1f2b'];
+  const cs = document.getElementById('conn-swatches');
+  CONN_COLORS.forEach((c, i) => {
+    const d = document.createElement('div');
+    d.className = 'sw' + (i === 0 ? ' sel' : '');
+    d.style.background = c;
+    d.addEventListener('click', () => {
+      state.connColor = c;
+      document.getElementById('conn-color').value = c;
+      document.querySelectorAll('#conn-swatches .sw').forEach(x => x.classList.remove('sel'));
+      d.classList.add('sel');
+    });
+    cs.appendChild(d);
+  });
+  document.getElementById('conn-color').addEventListener('input', e => {
+    state.connColor = e.target.value;
+    document.querySelectorAll('#conn-swatches .sw').forEach(x => x.classList.remove('sel'));
+  });
+
   document.getElementById('zoom-in').addEventListener('click', () => zoomBy(1.2));
   document.getElementById('zoom-out').addEventListener('click', () => zoomBy(1 / 1.2));
   document.getElementById('zoom-reset').addEventListener('click', () => {
@@ -98,8 +129,7 @@ export function selectTool(t) {
   document.querySelectorAll('.tool').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
   document.getElementById('ctx-note').classList.toggle('hidden', t !== 'note');
   document.getElementById('ctx-pen').classList.toggle('hidden', t !== 'pen');
-  const bar = document.getElementById('ctx-bar');
-  if (bar) bar.classList.toggle('visible', t === 'note' || t === 'pen');
+  document.getElementById('ctx-connect').classList.toggle('hidden', t !== 'connect');
   document.getElementById('stage').className = 'stage tool-' + t;
   if (t !== 'connect') state.connectFrom = null;
   requestRender();

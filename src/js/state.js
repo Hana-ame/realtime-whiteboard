@@ -16,6 +16,8 @@ export const state = {
   noteColor: NOTE_COLORS[0],
   penColor: PEN_COLORS[1],
   penSize: 4,
+  noteFontSize: 16,
+  connColor: '#9aa0b4',
   drag: null,
   spaceDown: false,
   connectFrom: null,

@@ -35,11 +35,6 @@
       </button>
     </div>
 
-    <button class="tool mini" id="delete-btn" title="删除选中 (Del)" style="display:none;">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>
-      删除
-    </button>
-
     <div class="spacer"></div>
 
     <div class="presence">
@@ -69,16 +64,26 @@
     </div>
   </div>
 
-  <!-- 第二行：工具设定 -->
+  <!-- 第二行：工具设定 + 删除 -->
   <div class="ctx-bar" id="ctx-bar">
     <div class="ctx" id="ctx-note">
       <div class="swatches" id="note-swatches"></div>
+      <label>字号 <input type="range" id="note-font-size" min="10" max="32" value="16"/><span id="note-font-size-val">16</span></label>
     </div>
     <div class="ctx hidden" id="ctx-pen">
       <div class="swatches" id="pen-swatches"></div>
       <input type="color" id="pen-color" value="#e23b3b" title="自定义颜色"/>
       <label>粗细 <input type="range" id="pen-size" min="1" max="24" value="4"/><span id="pen-size-val">4</span></label>
     </div>
+    <div class="ctx hidden" id="ctx-connect">
+      <div class="swatches" id="conn-swatches"></div>
+      <input type="color" id="conn-color" value="#9aa0b4" title="连线颜色"/>
+    </div>
+    <div class="spacer"></div>
+    <button class="tool mini" id="delete-btn" title="删除选中 (Del)" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>
+      删除
+    </button>
   </div>
 
   <!-- 画布 -->

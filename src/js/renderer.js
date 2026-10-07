@@ -9,7 +9,6 @@ import { connEndpoints, noteHandles, contentBounds } from './interaction.js';
 
 export const DPR = Math.max(1, window.devicePixelRatio || 1);
 export const GRID = 40;
-export const NOTE_FONT = 16;
 
 let canvas, ctx, mm, mmx, stage;
 let renderQueued = false;
@@ -191,7 +190,8 @@ function drawNote(n) {
   
   ctx.save();
   ctx.fillStyle = '#1c1f2b';
-  ctx.font = `${NOTE_FONT}px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif`;
+  const fs = state.noteFontSize;
+  ctx.font = `${fs}px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif`;
   ctx.textBaseline = 'top';
   const pad = 10;
   const lines = wrapText(n.text || '', n.w - pad * 2);
@@ -199,7 +199,7 @@ function drawNote(n) {
   for (const ln of lines) {
     if (yy > n.y + n.h - pad) break;
     ctx.fillText(ln, n.x + pad, yy);
-    yy += NOTE_FONT * 1.32;
+    yy += fs * 1.32;
   }
   ctx.restore();
 }
@@ -242,7 +242,8 @@ function drawStroke(s) {
 function drawConnection(c) {
   const e = connEndpoints(c);
   if (!e) return;
-  ctx.strokeStyle = '#9aa0b4';
+  const col = c.color || '#9aa0b4';
+  ctx.strokeStyle = col;
   ctx.lineWidth = 2 / state.view.scale;
   ctx.setLineDash([]);
   ctx.beginPath();
@@ -252,7 +253,7 @@ function drawConnection(c) {
   
   const ang = Math.atan2(e.b.y - e.a.y, e.b.x - e.a.x);
   const ah = 10 / state.view.scale;
-  ctx.fillStyle = '#9aa0b4';
+  ctx.fillStyle = col;
   ctx.beginPath();
   ctx.moveTo(e.b.x, e.b.y);
   ctx.lineTo(e.b.x - ah * Math.cos(ang - 0.4), e.b.y - ah * Math.sin(ang - 0.4));

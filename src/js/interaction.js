@@ -5,7 +5,7 @@
 
 import { state, pushUndo, removeEl, upsert, undo, redo, undoStack } from './state.js';
 import { screenToWorld, worldToScreen, uid, clamp, toast } from './utils.js';
-import { requestRender, NOTE_FONT, clearImageCache } from './renderer.js';
+import { requestRender, clearImageCache } from './renderer.js';
 import { openEditor, closeEditor, positionEditor } from './editor.js';
 import { broadcastCursor, broadcastThrottled, clearThrottled } from './network.js';
 import { selectTool, updateZoomLabel, updateDeleteBtn } from './toolbar.js';
@@ -240,7 +240,7 @@ export function initInteraction() {
     updateDeleteBtn();
     if (hit.type === 'note' || hit.type === 'image') {
       pushUndo();
-      state.drag = { mode: 'move', id: hit.id, dx: wp.x - hit.x, dy: wp.y - hit.y, moved: false };
+      state.drag = { mode: 'move', id: hit.id, dx: wp.x - hit.x, dy: wp.y - hit.y, moved: false, pointerId: e.pointerId };
     } else if (hit.type === 'stroke') {
       pushUndo();
       state.drag = {
@@ -387,7 +387,7 @@ export function initInteraction() {
       const hit = pick(wp);
       if (state.connectFrom && hit && hit.type === 'note' && hit.id !== state.connectFrom) {
         pushUndo();
-        const c = { id: uid(), type: 'connection', from: state.connectFrom, to: hit.id, rev: 0 };
+        const c = { id: uid(), type: 'connection', from: state.connectFrom, to: hit.id, color: state.connColor, rev: 0 };
         upsert(c);
       }
       state.connectFrom = null;
