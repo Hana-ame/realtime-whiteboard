@@ -1,0 +1,177 @@
+# room server 的构建与发布。
+#
+# 触发方式与产物：
+#   tag v*           -> 正式发布，产物挂到对应 tag 的 GitHub Release
+#   workflow_dispatch -> 手动指定版本号，同上
+#   master 分支推送  -> 只跑测试并上传 artifact，不建 Release（dev 构建）
+#   PR               -> 只跑测试
+#
+# 版本号来源：手动输入 > tag 名 > dev-<run_number>-<sha7>。
+name: Release Room Server
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - master
+    paths:
+      - 'room-go/**'
+      - '.github/workflows/release-room.yml'
+  pull_request:
+    paths:
+      - 'room-go/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号，不带 v 也可以，例如 v1.0.0'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: room-release-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.22.x'
+
+jobs:
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: arm
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: room-go/go.sum
+
+      - name: Resolve version
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            V="${GITHUB_REF#refs/tags/}"
+          else
+            V="dev-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          fi
+          V="${V#v}"
+          echo "version=$V" >> "$GITHUB_ENV"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tidy, vet, test
+        working-directory: room-go
+        run: |
+          set -euo pipefail
+          go mod tidy
+          go vet ./...
+          go test ./...
+
+      - name: Build
+        working-directory: room-go
+        run: |
+          set -euo pipefail
+          exe=""
+          [ "${{ matrix.goos }}" = "windows" ] && exe=".exe"
+          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=0 \
+            go build -trimpath -ldflags="-s -w -X main.version=v${version}" \
+            -o "room_v${version}_${{ matrix.goos }}_${{ matrix.goarch }}${exe}" .
+          ls -lh room_v*
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          base="room_v${version}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          src="room-go/${base}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            src="${src}.exe"
+            (cd room-go && zip -q "../dist/${base}.zip" "${base}.exe")
+          else
+            tar -czf "dist/${base}.tar.gz" -C room-go "$(basename "$src")"
+          fi
+          (cd dist && sha256sum "${base}".* > "SHA256SUMS.txt")
+          ls -lh dist
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-server-v${{ steps.vars.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/room_v*
+            dist/SHA256SUMS.txt
+          if-no-files-found: ignore
+
+  release:
+    name: publish release
+    needs: build
+    if: needs.build.outputs.is_release == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Re-resolve version
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          else
+            V="${GITHUB_REF#refs/tags/}"
+          fi
+          V="${V#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: room-server-*
+          merge-multiple: true
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 2 -type f \( -name 'room_v*' -o -name 'SHA256SUMS.txt' \) | sort
+          assets=()
+          while IFS= read -r f; do assets+=("$f"); done < <(find . -maxdepth 2 -type f \( -name 'room_v*' -o -name 'SHA256SUMS.txt' \) | sort)
+          gh release create "v${{ steps.vars.outputs.version }}" \
+            --title "room-server v${{ steps.vars.outputs.version }}" \
+            --generate-notes \
+            "${assets[@]}"
+          echo "已发布 v${{ steps.vars.outputs.version }}"
