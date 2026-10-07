@@ -28,7 +28,9 @@ export function connectToPeer(remoteId) {
 
 export function initNetwork() {
   try {
-    peer = new Peer();
+    let storedId;
+    try { storedId = localStorage.getItem('wb-peer-id') || undefined; } catch(e) { storedId = undefined; }
+    peer = new Peer(storedId);
   } catch (e) {
     toast('无法创建网络连接');
     return;
@@ -36,6 +38,7 @@ export function initNetwork() {
   
   peer.on('open', id => {
     myId = id;
+    try { localStorage.setItem('wb-peer-id', id); } catch(e) {}
     const myIdEl = document.getElementById('my-id');
     if (myIdEl) myIdEl.textContent = '房间: ' + id;
     updateNetUI();
@@ -70,6 +73,26 @@ export function initNetwork() {
   peer.on('error', err => {
     if (err.type === 'peer-unavailable') {
       toast('目标用户未在线或房间号不存在');
+    } else if (err.type === 'unavailable-id') {
+      // 已存房间ID被另一标签页占用 → 退回随机ID，不覆写本地存储（保留主标签页房间号）
+      toast('原房间ID被占用，已使用新ID');
+      try { if (peer && !peer.destroyed) peer.destroy(); } catch(e) {}
+      try {
+        peer = new Peer();
+        peer.on('open', id => {
+          myId = id;
+          const el = document.getElementById('my-id');
+          if (el) el.textContent = '房间: ' + id;
+          updateNetUI();
+          broadcast({ t: 'presence', name: peerName, color: peerColor });
+          const hash = window.location.hash.replace(/^#/, '');
+          const m = hash.match(/(?:room=)?([a-zA-Z0-9_-]+)/);
+          if (m && m[1] && m[1] !== id) connectToPeer(m[1]);
+        });
+        peer.on('connection', conn => setupConn(conn, false));
+        peer.on('error', e2 => { if (e2.type !== 'peer-unavailable') toast('网络提示: ' + e2.type); });
+        peer.on('disconnected', () => { if (peer && !peer.destroyed) { try { peer.reconnect(); } catch (e) {} } });
+      } catch(e2) { toast('网络重连失败'); }
     } else {
       toast('网络提示: ' + err.type);
     }
