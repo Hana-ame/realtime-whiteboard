@@ -35,13 +35,14 @@ concurrency:
   group: room-release-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
-# 版本号只解析一次，避免 build 矩阵的 6 个实例并发写 GITHUB_OUTPUT 产生竞争。
-# 规则：手动输入 > tag 名 > dev-<run#>-<sha7>。is_release 决定要不要真正建 Release。
+# res_version 保留原始形态（tag 名与手动输入都可能带前导 v），去掉前导 v 的
+# 归一化交给 build job 的 Resolve version 步骤在 bash 里做——这是唯一能同时正确
+# 处理「带 v」与「不带 v」两种输入的方式。矩阵各实例写各自的 GITHUB_ENV 不构成竞争。
 # 注意：这些键必须放在 env: 下面——GitHub 对 workflow 顶层做严格 schema 校验，
 # 未知顶层键会让整份 workflow 解析失败（表现为 run 无任何 job 直接 failure）。
 env:
   GO_VERSION: '1.22.x'
-  res_version: ${{ github.event_name == 'workflow_dispatch' && inputs.version || startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}-{1}', github.run_number, github.sha) }}
+  res_version: ${{ github.event_name == 'workflow_dispatch' && inputs.version || startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}-{1}', github.run_number, github.sha_short) }}
   res_is_release: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
@@ -49,7 +50,7 @@ jobs:
     name: build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ env.res_version }}
+      version: ${{ steps.vars.outputs.version }}
       is_release: ${{ env.res_is_release }}
     strategy:
       fail-fast: false
@@ -80,7 +81,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "==> 版本 v${{ env.res_version }}（is_release=${{ env.res_is_release }}，ref=${GITHUB_REF}）"
+          # 去掉前导 v：tag 推送时 res_version 是 "v1.0.0"，手动输入可能是 "1.0.0"
+          V="${res_version#v}"
+          echo "version=$V" >> "$GITHUB_ENV"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "==> 版本 v$V（is_release=${res_is_release}，ref=${GITHUB_REF}）"
 
       - name: Tidy, vet, test
         working-directory: room-go
@@ -97,15 +102,15 @@ jobs:
           exe=""
           [ "${{ matrix.goos }}" = "windows" ] && exe=".exe"
           GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=0 \
-            go build -trimpath -ldflags="-s -w -X main.version=v${{ env.res_version }}" \
-            -o "room_v${{ env.res_version }}_${{ matrix.goos }}_${{ matrix.goarch }}${exe}" .
+            go build -trimpath -ldflags="-s -w -X main.version=v${version}" \
+            -o "room_v${version}_${{ matrix.goos }}_${{ matrix.goarch }}${exe}" .
           ls -lh room_v*
 
       - name: Package
         run: |
           set -euo pipefail
           mkdir -p dist
-          base="room_v${{ env.res_version }}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          base="room_v${version}_${{ matrix.goos }}_${{ matrix.goarch }}"
           src="room-go/${base}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
             src="${src}.exe"
@@ -120,7 +125,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: room-server-v${{ env.res_version }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: room-server-v${{ steps.vars.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             dist/room_v*
             dist/SHA256SUMS.txt
@@ -152,8 +157,8 @@ jobs:
           find . -maxdepth 2 -type f \( -name 'room_v*' -o -name 'SHA256SUMS.txt' \) | sort
           assets=()
           while IFS= read -r f; do assets+=("$f"); done < <(find . -maxdepth 2 -type f \( -name 'room_v*' -o -name 'SHA256SUMS.txt' \) | sort)
-          gh release create "v${{ env.res_version }}" \
-            --title "room-server v${{ env.res_version }}" \
+          gh release create "v${{ needs.build.outputs.version }}" \
+            --title "room-server v${{ needs.build.outputs.version }}" \
             --generate-notes \
             "${assets[@]}"
-          echo "已发布 v${{ env.res_version }}"
+          echo "已发布 v${{ needs.build.outputs.version }}"
