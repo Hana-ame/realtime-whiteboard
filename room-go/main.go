@@ -36,7 +36,7 @@ func main() {
 
 	// Register peer
 	regMsg := map[string]interface{}{
-		"type":  "REGISTER",
+		"type": "REGISTER",
 		"payload": map[string]interface{}{
 			"id": roomName,
 		},
@@ -50,6 +50,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("WebRTC init failed: %v", err)
 	}
+
+	// Track our peer ID
+	var peerID string
 
 	// Handle incoming data channels
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
@@ -89,9 +92,9 @@ func main() {
 			switch msgType {
 			case "OPEN":
 				payload, _ := data["payload"].(map[string]interface{})
-				id, _ := payload["id"].(string)
+				peerID, _ = payload["id"].(string)
 				fmt.Println("\n========================================")
-				fmt.Printf("  Room ID: %s\n", id)
+				fmt.Printf("  Room ID: %s\n", peerID)
 				fmt.Println("  Status:  Active & Connectable")
 				fmt.Println("========================================\n")
 				fmt.Println("Open the whiteboard in a browser and enter this room ID to join.")
@@ -107,8 +110,21 @@ func main() {
 
 				fmt.Printf("[room] OFFER from %s (conn: %s)\n", srcPeer, connID)
 
+				// Parse SDP type
+				var sdpTypeParsed webrtc.SDPType
+				switch sdpType {
+				case "offer":
+					sdpTypeParsed = webrtc.SDPTypeOffer
+				case "answer":
+					sdpTypeParsed = webrtc.SDPTypeAnswer
+				case "pranswer":
+					sdpTypeParsed = webrtc.SDPTypePrAnswer
+				case "rollback":
+					sdpTypeParsed = webrtc.SDPTypeRollback
+				}
+
 				if err := pc.SetRemoteDescription(webrtc.SessionDescription{
-					Type: webrtc.SDPType(sdpType),
+					Type: sdpTypeParsed,
 					SDP:  sdpDesc,
 				}); err != nil {
 					log.Printf("[room] SetRemoteDescription failed: %v", err)
@@ -138,7 +154,7 @@ func main() {
 					"payload": map[string]interface{}{
 						"dstPeer":      srcPeer,
 						"connectionId": connID,
-						"peerId":       id,
+						"peerId":       peerID,
 						"sdp": map[string]interface{}{
 							"type": answer.Type.String(),
 							"sdp":  answer.SDP,
