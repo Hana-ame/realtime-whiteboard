@@ -81,8 +81,7 @@ func main() {
 
 			switch msgType {
 			case "OPEN":
-				payload, _ := data["payload"].(map[string]interface{})
-				peerID, _ = payload["id"].(string)
+				peerID = roomName
 				fmt.Println("\n========================================")
 				fmt.Printf("  Room ID: %s\n", peerID)
 				fmt.Println("  Status:  Active & Connectable")
