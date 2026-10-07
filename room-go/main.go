@@ -109,16 +109,17 @@ func main() {
 
 				fmt.Printf("[room] OFFER from %s (conn: %s)\n", srcPeer, connID)
 
-				// Parse SDP type
-				var sdpTypeParsed webrtc.SDPType
-				sdpTypeStr := fmt.Sprintf("%v", sdp["type"])
-				switch sdpTypeStr {
-				case "offer":
-					sdpTypeParsed = webrtc.SDPTypeOffer
-				case "answer":
-					sdpTypeParsed = webrtc.SDPTypeAnswer
-				default:
-					sdpTypeParsed = webrtc.SDPType(sdpTypeStr)
+				// Parse SDP type - default to offer
+				var sdpTypeParsed webrtc.SDPType = webrtc.SDPTypeOffer
+				if sdpTypeVal, ok := sdp["type"]; ok {
+					if sdpTypeStr, ok := sdpTypeVal.(string); ok {
+						switch sdpTypeStr {
+						case "offer":
+							sdpTypeParsed = webrtc.SDPTypeOffer
+						case "answer":
+							sdpTypeParsed = webrtc.SDPTypeAnswer
+						}
+					}
 				}
 
 				if err := pc.SetRemoteDescription(webrtc.SessionDescription{
