@@ -38,6 +38,12 @@ export const peerName = '用户' + peerId.slice(0,3).toUpperCase();
 export const peerColor = hslColor(peerId);
 export const peers = {};
 
+// 被删除的元素 id。本地删过就永不复活——否则收到旧快照会把已删元素重新拉出来。
+// 旧代码把 tombstones 放在 network.js，导致"本地自己删的元素"没有 tombstone，
+// 收到含该元素的 fullSync 照样复活。元素 id 是全局唯一 uid，不会重造，所以
+// tombstone 可以永久生效。
+export const tombstones = new Set();
+
 // 内容缓存挂在具体房间下。旧代码固定写 'wb-elements-v1'，是全部房间共用的一个锅，
 // 换房间会把上一个房间的画布当成新房间的内容显示出来。
 export let persistKey = 'wb-elements-v2:default';
@@ -86,10 +92,19 @@ export function pushUndo() {
 export function undo() {
   if (!undoStack.length) return;
   redoStack.push(deepCopy(state.elements));
-  state.elements = undoStack.pop();
+  const before = state.elements;
+  const restored = undoStack.pop();
+  // 撤销删除的元素要清 tombstone，否则它会显示出来但再也无法被更新
+  for (const id in restored) tombstones.delete(id);
+  // 撤销添加的元素要进 tombstone，否则旧 fullSync 会把它复活
+  for (const id in before) {
+    if (!restored.hasOwnProperty(id)) tombstones.add(id);
+  }
+  state.elements = restored;
   state.selectedId = null;
   persist();
-  if (_broadcastFn) _broadcastFn({ t: 'state', elements: state.elements, fullSync: true });
+  // 刻意不广播：undo 是本地历史。广播全量快照会覆盖别人并发的改动，
+  // 而且旧快照里还留着已删元素，会触发"删除复活"（见 network.js fullSync 分支）
   if (_requestRenderFn) _requestRenderFn();
   if (_updateDeleteBtnFn) _updateDeleteBtnFn();
   toast('已撤销');
@@ -101,10 +116,16 @@ export function undo() {
 export function redo() {
   if (!redoStack.length) return;
   undoStack.push(deepCopy(state.elements));
-  state.elements = redoStack.pop();
+  const before = state.elements;
+  const restored = redoStack.pop();
+  for (const id in restored) tombstones.delete(id);
+  // 重做删除的元素要进 tombstone，否则旧 fullSync 会把它复活
+  for (const id in before) {
+    if (!restored.hasOwnProperty(id)) tombstones.add(id);
+  }
+  state.elements = restored;
   state.selectedId = null;
   persist();
-  if (_broadcastFn) _broadcastFn({ t: 'state', elements: state.elements, fullSync: true });
   if (_requestRenderFn) _requestRenderFn();
   if (_updateDeleteBtnFn) _updateDeleteBtnFn();
   toast('已重做');
@@ -119,6 +140,10 @@ export function upsert(el, doBroadcast = true) {
   const cur = state.elements[el.id];
   el.rev = Math.max(el.rev || 0, cur?.rev || 0) + 1;
   el.updatedAt = Date.now();
+  // cid = 最后一次改动的客户端（PeerJS id）。rev 是每元素自增计数器，本身不构成
+  // 全序：两个端同时改同一元素会算出相同 rev，严格 > 比较会丢掉第二条、谁赢取决于
+  // 网络到达顺序，端间永久分叉。带 cid 后所有端都能算出同一个赢家。
+  el.cid = selfPeerId || el.cid || '';
   delete el._isLiveMove;
   state.elements[el.id] = el;
   persist();
@@ -132,10 +157,16 @@ export function upsert(el, doBroadcast = true) {
 export function bringToFront(id) {
   if (!state.elements[id]) return;
   const el = state.elements[id];
-  delete state.elements[id];
-  state.elements[id] = el;
-  persist();
-  if (_requestRenderFn) _requestRenderFn();
+  // 用显式 z 而非对象插入顺序：旧代码靠 delete+reinsert 改插入顺序且本地不广播，
+  // 各端叠放顺序分叉，点同一个交叠位置会选中不同元素。
+  let maxZ = el.z || 0;
+  for (const k in state.elements) {
+    const z = state.elements[k].z || 0;
+    if (z > maxZ) maxZ = z;
+  }
+  if (el.z === maxZ) return;   // 已经在最上层，不动（否则每次点击都广播一次无意义变化）
+  el.z = maxZ + 1;
+  upsert(el, true);            // 必须广播，否则各端又分叉
 }
 
 /**
@@ -149,6 +180,7 @@ export function removeEl(id, doBroadcast = true) {
   if (el.type === 'image' && _clearImageCacheFn) _clearImageCacheFn(id);
   delete state.elements[id];
   if (state.selectedId === id) state.selectedId = null;
+  tombstones.add(id);
 
   // 同时清理与该元素关联的所有连线
   const linkedConnections = [];
@@ -160,6 +192,7 @@ export function removeEl(id, doBroadcast = true) {
   }
   linkedConnections.forEach(connId => {
     delete state.elements[connId];
+    tombstones.add(connId);
     if (doBroadcast && _broadcastFn) _broadcastFn({t: 'delete', id: connId});
   });
 

@@ -57,21 +57,26 @@ export function connEndpoints(c) {
 }
 
 export function pick(p) {
+  // 与渲染顺序一致：类型优先（便签>图片>描画>连线），同类型内 z 大的在上，
+  // 同 z 按插入顺序（后插在上）。z 由 bringToFront 设置并广播，缺省 0。
+  // 旧代码只按对象插入顺序，bringToFront 本地改不广播，各端分叉后点同一个
+  // 交叠位置会选中不同元素。
   const ids = Object.keys(state.elements);
-  for (let i = ids.length - 1; i >= 0; i--) {
-    const el = state.elements[ids[i]];
+  const rank = { note: 3, image: 2, stroke: 1, connection: 0 };
+  const idx = new Map(ids.map((id, i) => [id, i]));
+  ids.sort((a, b) => {
+    const ea = state.elements[a], eb = state.elements[b];
+    const ra = rank[ea.type] ?? 0, rb = rank[eb.type] ?? 0;
+    if (ra !== rb) return rb - ra;
+    const za = ea.z || 0, zb = eb.z || 0;
+    if (za !== zb) return zb - za;
+    return idx.get(b) - idx.get(a);
+  });
+  for (const id of ids) {
+    const el = state.elements[id];
     if (el.type === 'note' && hitNote(el, p)) return el;
-  }
-  for (let i = ids.length - 1; i >= 0; i--) {
-    const el = state.elements[ids[i]];
     if (el.type === 'image' && hitNote(el, p)) return el;
-  }
-  for (let i = ids.length - 1; i >= 0; i--) {
-    const el = state.elements[ids[i]];
     if (el.type === 'stroke' && distToStroke(el, p)) return el;
-  }
-  for (let i = ids.length - 1; i >= 0; i--) {
-    const el = state.elements[ids[i]];
     if (el.type === 'connection') {
       const e = connEndpoints(el);
       if (e && distToSeg(p, e.a, e.b) < 7 / state.view.scale) return el;
@@ -146,22 +151,27 @@ export function insertImageFile(file) {
     const rawDataUrl = evt.target.result;
     const img = new Image();
     img.onload = () => {
-      // 对超大图片进行合理尺寸缩放限制（保持比例，便于快速 P2P 传输与存储）
-      const maxDim = 1200;
+      const isGif = rawDataUrl.startsWith('data:image/gif');
+      let dataUrl = rawDataUrl;
       let targetW = img.naturalWidth;
       let targetH = img.naturalHeight;
-      if (targetW > maxDim || targetH > maxDim) {
-        const ratio = Math.min(maxDim / targetW, maxDim / targetH);
-        targetW = Math.round(targetW * ratio);
-        targetH = Math.round(targetH * ratio);
-      }
 
-      const offCanvas = document.createElement('canvas');
-      offCanvas.width = targetW;
-      offCanvas.height = targetH;
-      const offCtx = offCanvas.getContext('2d');
-      offCtx.drawImage(img, 0, 0, targetW, targetH);
-      const optimizedDataUrl = offCanvas.toDataURL('image/png');
+      // GIF 保留原始 dataUrl（动图帧信息不能丢，toDataURL('png') 只会得到第一帧）
+      // 静态图缩放到 1200px 并重新编码为 PNG（减小 P2P 传输与存储体积）
+      if (!isGif) {
+        const maxDim = 1200;
+        if (targetW > maxDim || targetH > maxDim) {
+          const ratio = Math.min(maxDim / targetW, maxDim / targetH);
+          targetW = Math.round(targetW * ratio);
+          targetH = Math.round(targetH * ratio);
+        }
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = targetW;
+        offCanvas.height = targetH;
+        const offCtx = offCanvas.getContext('2d');
+        offCtx.drawImage(img, 0, 0, targetW, targetH);
+        dataUrl = offCanvas.toDataURL('image/png');
+      }
 
       // 画布上显示的适中初始尺寸
       const displayMax = 320;
@@ -188,14 +198,14 @@ export function insertImageFile(file) {
         y: posY,
         w: dw,
         h: dh,
-        dataUrl: optimizedDataUrl,
+        dataUrl,
         rev: 0
       };
       upsert(imageEl, true);
       state.selectedId = imageEl.id;
       updateDeleteBtn();
       selectTool('select');
-      toast('已插入图片');
+      toast('已插入' + (isGif ? '动图' : '图片'));
     };
     img.src = rawDataUrl;
   };
