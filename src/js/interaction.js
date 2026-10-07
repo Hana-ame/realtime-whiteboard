@@ -8,7 +8,7 @@ import { screenToWorld, worldToScreen, uid, clamp, toast } from './utils.js';
 import { requestRender, NOTE_FONT, clearImageCache } from './renderer.js';
 import { openEditor, closeEditor } from './editor.js';
 import { broadcastCursor, broadcastThrottled, clearThrottled } from './network.js';
-import { selectTool, updateZoomLabel } from './toolbar.js';
+import { selectTool, updateZoomLabel, updateDeleteBtn } from './toolbar.js';
 
 export const NOTE_W = 170;
 export const NOTE_H = 120;
@@ -160,6 +160,7 @@ export function initInteraction() {
       const hit = pick(wp);
       if (hit && hit.type === 'note') {
         state.selectedId = hit.id;
+        updateDeleteBtn();
         selectTool('select');
         pushUndo();
         state.drag = { mode: 'move', id: hit.id, dx: wp.x - hit.x, dy: wp.y - hit.y, moved: false };
@@ -173,6 +174,7 @@ export function initInteraction() {
         };
         upsert(n);
         state.selectedId = n.id;
+        updateDeleteBtn();
         selectTool('select');
         openEditor(n);
       }
@@ -204,6 +206,7 @@ export function initInteraction() {
     const hit = pick(wp);
     if (!hit) {
       state.selectedId = null;
+      updateDeleteBtn();
       state.drag = { mode: 'pan', sx: sp.x, sy: sp.y, vx: state.view.x, vy: state.view.y };
       requestRender();
       return;
@@ -228,6 +231,7 @@ export function initInteraction() {
     }
     
     state.selectedId = hit.id;
+    updateDeleteBtn();
     if (hit.type === 'note' || hit.type === 'image') {
       pushUndo();
       state.drag = { mode: 'move', id: hit.id, dx: wp.x - hit.x, dy: wp.y - hit.y, moved: false };
@@ -391,6 +395,7 @@ export function initInteraction() {
     const hit = pick(wp);
     if (hit && hit.type === 'note') {
       state.selectedId = hit.id;
+      updateDeleteBtn();
       openEditor(hit);
     }
   });
@@ -542,6 +547,7 @@ export function initInteraction() {
             };
             upsert(imageEl, true);
             state.selectedId = imageEl.id;
+            updateDeleteBtn();
             selectTool('select');
             toast('已粘贴图片');
           };
@@ -551,5 +557,57 @@ export function initInteraction() {
         break;
       }
     }
+  });
+
+  // --- Pinch-to-zoom & two-finger pan (mobile) ---
+  let pinchState = null;
+  const getTouchDist = touches => {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.hypot(dx, dy);
+  };
+  const getTouchCenter = (touches, rect) => {
+    return {
+      x: (touches[0].clientX + touches[1].clientX) / 2 - rect.left,
+      y: (touches[0].clientY + touches[1].clientY) / 2 - rect.top
+    };
+  };
+
+  canvas.addEventListener('touchstart', e => {
+    if (e.touches.length !== 2) return;
+    // Cancel any single-finger drag when pinch begins
+    if (state.drag) {
+      if (state.drag.id) clearThrottled(state.drag.id);
+      state.drag = null;
+      stage.classList.remove('panning');
+    }
+    const rect = canvas.getBoundingClientRect();
+    const c = getTouchCenter(e.touches, rect);
+    pinchState = {
+      dist: getTouchDist(e.touches),
+      scale: state.view.scale,
+      cx: c.x, cy: c.y,
+      vx: state.view.x, vy: state.view.y
+    };
+    e.preventDefault();
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', e => {
+    if (e.touches.length !== 2 || !pinchState) return;
+    const rect = canvas.getBoundingClientRect();
+    const c = getTouchCenter(e.touches, rect);
+    const dist = getTouchDist(e.touches);
+    const newScale = clamp(pinchState.scale * (dist / pinchState.dist), 0.15, 6);
+    const anchor = screenToWorld(pinchState.cx, pinchState.cy, { x: pinchState.vx, y: pinchState.vy, scale: pinchState.scale });
+    state.view.scale = newScale;
+    state.view.x = pinchState.cx - anchor.x * newScale + (c.x - pinchState.cx);
+    state.view.y = pinchState.cy - anchor.y * newScale + (c.y - pinchState.cy);
+    updateZoomLabel();
+    requestRender();
+    e.preventDefault();
+  }, { passive: false });
+
+  canvas.addEventListener('touchend', e => {
+    if (e.touches.length < 2) pinchState = null;
   });
 }

@@ -8,9 +8,9 @@ import { initRenderer, resize, requestRender, clearImageCache } from './renderer
 import { initInteraction, NOTE_W, NOTE_H } from './interaction.js';
 import { initEditor } from './editor.js';
 import { initNetwork, updatePresence, broadcast } from './network.js';
-import { initToolbar, updateZoomLabel } from './toolbar.js';
+import { initToolbar, updateZoomLabel, updateDeleteBtn } from './toolbar.js';
 
-setDeps(broadcast, requestRender, clearImageCache);
+setDeps(broadcast, requestRender, clearImageCache, updateDeleteBtn);
 
 function load() {
   try {

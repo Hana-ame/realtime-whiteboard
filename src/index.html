@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="./css/toolbar.css" />
 <link rel="stylesheet" href="./css/canvas.css" />
 <link rel="stylesheet" href="./css/network.css" />
+<link rel="stylesheet" href="./css/mobile.css" />
 </head>
 <body>
 <div id="app">
@@ -34,18 +35,10 @@
       </button>
     </div>
 
-    <div class="ctx-container">
-      <!-- 便签颜色（便签工具时显示） -->
-      <div class="ctx" id="ctx-note">
-        <div class="swatches" id="note-swatches"></div>
-      </div>
-      <!-- 画笔设置（画笔工具时显示） -->
-      <div class="ctx hidden" id="ctx-pen">
-        <div class="swatches" id="pen-swatches"></div>
-        <input type="color" id="pen-color" value="#e23b3b" title="自定义颜色"/>
-        <label>粗细 <input type="range" id="pen-size" min="1" max="24" value="4"/><span id="pen-size-val">4</span></label>
-      </div>
-    </div>
+    <button class="tool mini" id="delete-btn" title="删除选中 (Del)" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>
+      删除
+    </button>
 
     <div class="spacer"></div>
 
@@ -73,6 +66,18 @@
       <button class="iconbtn" id="fit" title="适应内容">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke-linecap="round"/></svg>
       </button>
+    </div>
+  </div>
+
+  <!-- 第二行：工具设定 -->
+  <div class="ctx-bar" id="ctx-bar">
+    <div class="ctx" id="ctx-note">
+      <div class="swatches" id="note-swatches"></div>
+    </div>
+    <div class="ctx hidden" id="ctx-pen">
+      <div class="swatches" id="pen-swatches"></div>
+      <input type="color" id="pen-color" value="#e23b3b" title="自定义颜色"/>
+      <label>粗细 <input type="range" id="pen-size" min="1" max="24" value="4"/><span id="pen-size-val">4</span></label>
     </div>
   </div>
 

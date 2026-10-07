@@ -3,7 +3,7 @@
  * @module toolbar
  */
 
-import { state, NOTE_COLORS, PEN_COLORS, pushUndo, upsert } from './state.js';
+import { state, NOTE_COLORS, PEN_COLORS, pushUndo, upsert, removeEl } from './state.js';
 import { requestRender } from './renderer.js';
 import { clamp, screenToWorld } from './utils.js';
 import { contentBounds } from './interaction.js';
@@ -69,6 +69,16 @@ export function initToolbar() {
   });
   document.getElementById('fit').addEventListener('click', fitToContent);
 
+  // Delete button (for mobile where right-click/keyboard are unavailable)
+  document.getElementById('delete-btn').addEventListener('click', () => {
+    if (state.selectedId) {
+      pushUndo();
+      removeEl(state.selectedId);
+    } else {
+      toast('请先选择一个元素');
+    }
+  });
+
   // 提示框关闭逻辑
   const hintBox = document.getElementById('hint-box');
   const hintCloseBtn = document.getElementById('hint-close-btn');
@@ -88,9 +98,16 @@ export function selectTool(t) {
   document.querySelectorAll('.tool').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
   document.getElementById('ctx-note').classList.toggle('hidden', t !== 'note');
   document.getElementById('ctx-pen').classList.toggle('hidden', t !== 'pen');
+  const bar = document.getElementById('ctx-bar');
+  if (bar) bar.classList.toggle('visible', t === 'note' || t === 'pen');
   document.getElementById('stage').className = 'stage tool-' + t;
   if (t !== 'connect') state.connectFrom = null;
   requestRender();
+}
+
+export function updateDeleteBtn() {
+  const btn = document.getElementById('delete-btn');
+  if (btn) btn.style.display = state.selectedId ? '' : 'none';
 }
 
 export function updateZoomLabel() {

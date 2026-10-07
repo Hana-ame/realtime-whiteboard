@@ -1,0 +1,100 @@
+/* Mobile responsive styles */
+
+@media (max-width: 768px) {
+  .topbar {
+    height: 44px;
+    padding: 0 6px;
+    gap: 3px;
+  }
+
+  .brand {
+    font-size: 12px;
+    gap: 5px;
+  }
+  .brand small { display: none; }
+  .brand .dot { width: 9px; height: 9px; }
+
+  .tools {
+    padding: 2px;
+    gap: 1px;
+  }
+  .tool {
+    padding: 0 7px;
+    height: 30px;
+    gap: 0;
+    font-size: 0;
+  }
+  .tool svg { width: 16px; height: 16px; flex-basis: 16px; }
+  .tool kbd { display: none; }
+
+  .ctx-bar {
+    padding: 4px 8px;
+    gap: 6px;
+  }
+  .ctx-bar .ctx { gap: 4px; }
+  .swatches { gap: 3px; }
+  .sw { width: 18px; height: 18px; border-radius: 4px; border-width: 1.5px; }
+  input[type=color] { width: 24px; height: 24px; border-radius: 4px; }
+  input[type=range] { width: 60px; }
+  .ctx label { font-size: 10px; gap: 3px; }
+
+  .spacer { display: none; }
+
+  .presence {
+    gap: 4px;
+    font-size: 10px;
+  }
+  .avatars .av { width: 20px; height: 20px; font-size: 9px; margin-left: -5px; }
+  #online-count { font-size: 10px; }
+
+  .net { gap: 3px; }
+  .net-id { max-width: 60px; font-size: 9px; padding: 3px 5px; }
+  .rid { width: 64px; height: 26px; font-size: 11px; padding: 0 5px; }
+  .tool.mini { height: 26px; padding: 0 8px; font-size: 11px; }
+  .net-count { display: none; }
+
+  .sep { display: none; }
+
+  .zoom { gap: 1px; padding: 2px; }
+  .zbtn { width: 26px; height: 26px; font-size: 14px; border-radius: 6px; }
+  .zval { width: 36px; font-size: 10px; }
+  .iconbtn { width: 26px; height: 26px; border-radius: 6px; }
+  .iconbtn svg { width: 13px; height: 13px; }
+
+  .minimap { display: none; }
+
+  .hint {
+    max-width: 170px;
+    font-size: 10px;
+    padding: 6px 20px 6px 8px;
+    line-height: 1.5;
+    left: 8px;
+    bottom: 8px;
+  }
+  .hint-close { top: 4px; right: 4px; font-size: 14px; }
+
+  .toast {
+    font-size: 11px;
+    padding: 6px 12px;
+    top: 8px;
+  }
+
+  #editor {
+    padding: 8px;
+    border-radius: 6px;
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+}
+
+/* Very small screens (phones in portrait) */
+@media (max-width: 480px) {
+  .brand { display: none; }
+  .tool { padding: 0 5px; }
+  .presence { display: none; }
+  .net-id { display: none; }
+  .ctx-bar { padding: 3px 6px; gap: 4px; }
+  .ctx-bar .ctx { gap: 3px; }
+  .sw { width: 16px; height: 16px; }
+  .swatches { gap: 2px; }
+  .hint { display: none; }
+}

@@ -37,11 +37,13 @@ export const peers = {};
 let _broadcastFn = null;
 let _requestRenderFn = null;
 let _clearImageCacheFn = null;
+let _updateDeleteBtnFn = null;
 
-export function setDeps(broadcastFn, requestRenderFn, clearImageCacheFn) {
+export function setDeps(broadcastFn, requestRenderFn, clearImageCacheFn, updateDeleteBtnFn) {
   _broadcastFn = broadcastFn;
   _requestRenderFn = requestRenderFn;
   _clearImageCacheFn = clearImageCacheFn;
+  _updateDeleteBtnFn = updateDeleteBtnFn;
 }
 
 /**
@@ -73,6 +75,7 @@ export function undo() {
   persist();
   if (_broadcastFn) _broadcastFn({ t: 'state', elements: state.elements, fullSync: true });
   if (_requestRenderFn) _requestRenderFn();
+  if (_updateDeleteBtnFn) _updateDeleteBtnFn();
   toast('已撤销');
 }
 
@@ -87,6 +90,7 @@ export function redo() {
   persist();
   if (_broadcastFn) _broadcastFn({ t: 'state', elements: state.elements, fullSync: true });
   if (_requestRenderFn) _requestRenderFn();
+  if (_updateDeleteBtnFn) _updateDeleteBtnFn();
   toast('已重做');
 }
 
@@ -134,4 +138,5 @@ export function removeEl(id, doBroadcast = true) {
   persist();
   if (doBroadcast && _broadcastFn) _broadcastFn({t: 'delete', id: id});
   if (_requestRenderFn) _requestRenderFn();
+  if (_updateDeleteBtnFn) _updateDeleteBtnFn();
 }
