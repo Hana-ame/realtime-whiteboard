@@ -33,7 +33,11 @@
       <button class="tool" data-tool="pan" title="平移 (H / 空格)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11V5m0 0L6 8m3-3l3 3M15 13v6m0 0l3-3m-3 3l-3-3M4 11h6m4 0h6" stroke-linecap="round"/></svg>平移 <kbd>H</kbd>
       </button>
+      <button class="tool" id="upload-img-btn" title="上传图片">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>图片
+      </button>
     </div>
+    <input type="file" id="image-upload" accept="image/*" style="display:none" />
 
     <div class="spacer"></div>
 
@@ -101,7 +105,7 @@
     <div class="hint" id="hint-box">
       <button class="hint-close" id="hint-close-btn" title="关闭提示">×</button>
       <b>提示</b>：拖空白处平移 · 滚轮缩放 · 双击便签编辑<br>
-      图片：支持 <kbd>Ctrl+V</kbd> 直接粘贴图片 (P2P同步)<br>
+      图片：点 <b>图片</b> 按钮上传 · <kbd>Ctrl+V</kbd> 粘贴 (P2P同步)<br>
       便签：右键删除 / 顶部换色 · <kbd>Del</kbd> 删除选中<br>
       同屏：点 <b>分享链接</b> 发给好友直接加入，或输入ID连接
     </div>

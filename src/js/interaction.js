@@ -136,6 +136,72 @@ function getPos(e, canvas) {
   return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
 
+/**
+ * 插入图片到画布（从文件或粘贴事件复用）
+ * 缩放至最大 1200px 保持 P2P 传输效率，显示尺寸 320px
+ */
+export function insertImageFile(file) {
+  const reader = new FileReader();
+  reader.onload = evt => {
+    const rawDataUrl = evt.target.result;
+    const img = new Image();
+    img.onload = () => {
+      // 对超大图片进行合理尺寸缩放限制（保持比例，便于快速 P2P 传输与存储）
+      const maxDim = 1200;
+      let targetW = img.naturalWidth;
+      let targetH = img.naturalHeight;
+      if (targetW > maxDim || targetH > maxDim) {
+        const ratio = Math.min(maxDim / targetW, maxDim / targetH);
+        targetW = Math.round(targetW * ratio);
+        targetH = Math.round(targetH * ratio);
+      }
+
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = targetW;
+      offCanvas.height = targetH;
+      const offCtx = offCanvas.getContext('2d');
+      offCtx.drawImage(img, 0, 0, targetW, targetH);
+      const optimizedDataUrl = offCanvas.toDataURL('image/png');
+
+      // 画布上显示的适中初始尺寸
+      const displayMax = 320;
+      let dw = targetW, dh = targetH;
+      if (dw > displayMax || dh > displayMax) {
+        const dRatio = Math.min(displayMax / dw, displayMax / dh);
+        dw = Math.round(dw * dRatio);
+        dh = Math.round(dh * dRatio);
+      }
+
+      // 放置在当前鼠标/光标世界坐标，或视口中心
+      const center = screenToWorld(state.W / 2, state.H / 2, state.view);
+      const hasMoved = state.pointerWorld.x !== 0 || state.pointerWorld.y !== 0;
+      const px = hasMoved ? state.pointerWorld.x : center.x;
+      const py = hasMoved ? state.pointerWorld.y : center.y;
+      const posX = px - dw / 2;
+      const posY = py - dh / 2;
+
+      pushUndo();
+      const imageEl = {
+        id: uid(),
+        type: 'image',
+        x: posX,
+        y: posY,
+        w: dw,
+        h: dh,
+        dataUrl: optimizedDataUrl,
+        rev: 0
+      };
+      upsert(imageEl, true);
+      state.selectedId = imageEl.id;
+      updateDeleteBtn();
+      selectTool('select');
+      toast('已插入图片');
+    };
+    img.src = rawDataUrl;
+  };
+  reader.readAsDataURL(file);
+}
+
 export function initInteraction() {
   const canvas = document.getElementById('board');
   const stage = document.getElementById('stage');
@@ -533,73 +599,12 @@ export function initInteraction() {
     if (state.editingId != null) return;
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
-
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       if (item.type.indexOf('image') !== -1) {
         e.preventDefault();
         const file = item.getAsFile();
-        if (!file) continue;
-
-        const reader = new FileReader();
-        reader.onload = evt => {
-          const rawDataUrl = evt.target.result;
-          const img = new Image();
-          img.onload = () => {
-            // 对超大图片进行合理尺寸缩放限制（保持比例，便于快速 P2P 传输与存储）
-            const maxDim = 1200;
-            let targetW = img.naturalWidth;
-            let targetH = img.naturalHeight;
-            if (targetW > maxDim || targetH > maxDim) {
-              const ratio = Math.min(maxDim / targetW, maxDim / targetH);
-              targetW = Math.round(targetW * ratio);
-              targetH = Math.round(targetH * ratio);
-            }
-
-            const offCanvas = document.createElement('canvas');
-            offCanvas.width = targetW;
-            offCanvas.height = targetH;
-            const offCtx = offCanvas.getContext('2d');
-            offCtx.drawImage(img, 0, 0, targetW, targetH);
-            const optimizedDataUrl = offCanvas.toDataURL('image/png');
-
-            // 画布上显示的适中初始尺寸
-            const displayMax = 320;
-            let dw = targetW, dh = targetH;
-            if (dw > displayMax || dh > displayMax) {
-              const dRatio = Math.min(displayMax / dw, displayMax / dh);
-              dw = Math.round(dw * dRatio);
-              dh = Math.round(dh * dRatio);
-            }
-
-            // 放置在当前鼠标/光标世界坐标，或视口中心
-            const center = screenToWorld(state.W / 2, state.H / 2, state.view);
-            const hasMoved = state.pointerWorld.x !== 0 || state.pointerWorld.y !== 0;
-            const px = hasMoved ? state.pointerWorld.x : center.x;
-            const py = hasMoved ? state.pointerWorld.y : center.y;
-            const posX = px - dw / 2;
-            const posY = py - dh / 2;
-
-            pushUndo();
-            const imageEl = {
-              id: uid(),
-              type: 'image',
-              x: posX,
-              y: posY,
-              w: dw,
-              h: dh,
-              dataUrl: optimizedDataUrl,
-              rev: 0
-            };
-            upsert(imageEl, true);
-            state.selectedId = imageEl.id;
-            updateDeleteBtn();
-            selectTool('select');
-            toast('已粘贴图片');
-          };
-          img.src = rawDataUrl;
-        };
-        reader.readAsDataURL(file);
+        if (file) insertImageFile(file);
         break;
       }
     }

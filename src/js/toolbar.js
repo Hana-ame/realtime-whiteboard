@@ -6,7 +6,7 @@
 import { state, NOTE_COLORS, PEN_COLORS, pushUndo, upsert, removeEl } from './state.js';
 import { requestRender } from './renderer.js';
 import { clamp, screenToWorld } from './utils.js';
-import { contentBounds } from './interaction.js';
+import { contentBounds, insertImageFile } from './interaction.js';
 
 export function initToolbar() {
   document.getElementById('tools').addEventListener('click', e => {
@@ -145,6 +145,16 @@ export function initToolbar() {
     } else {
       toast('请先选择一个元素');
     }
+  });
+
+  // Image upload button
+  const uploadBtn = document.getElementById('upload-img-btn');
+  const fileInput = document.getElementById('image-upload');
+  uploadBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (file) insertImageFile(file);
+    fileInput.value = ''; // reset to allow re-uploading same file
   });
 
   // 提示框关闭逻辑
