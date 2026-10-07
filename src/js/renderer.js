@@ -49,8 +49,11 @@ export function initRenderer() {
 }
 
 export function resize() {
-  state.W = stage.clientWidth;
-  state.H = stage.clientHeight;
+  const newW = stage.clientWidth;
+  const newH = stage.clientHeight;
+  if (newW === state.W && newH === state.H) return;
+  state.W = newW;
+  state.H = newH;
   canvas.width = Math.round(state.W * DPR);
   canvas.height = Math.round(state.H * DPR);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);

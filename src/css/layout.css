@@ -10,7 +10,7 @@
   align-items:center;gap:10px;padding:5px 14px;
   border-bottom:1px solid var(--bar-line);z-index:19;
   flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;
-  min-height:38px;transition:opacity .15s;
+  height:38px;transition:opacity .15s;
 }
 .ctx-bar.empty{opacity:.3;}
 .brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:15px;letter-spacing:.3px;}

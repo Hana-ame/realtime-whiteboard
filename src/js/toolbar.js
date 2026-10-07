@@ -141,7 +141,9 @@ export function selectTool(t) {
   document.getElementById('ctx-connect').classList.toggle('hidden', t !== 'connect');
   const bar = document.getElementById('ctx-bar');
   if (bar) bar.classList.toggle('empty', t !== 'note' && t !== 'pen' && t !== 'connect' && !state.selectedId);
-  document.getElementById('stage').className = 'stage tool-' + t;
+  const stage = document.getElementById('stage');
+  stage.classList.remove('tool-select', 'tool-note', 'tool-pen', 'tool-connect', 'tool-pan');
+  stage.classList.add('tool-' + t);
   if (t !== 'connect') state.connectFrom = null;
   requestRender();
 }
