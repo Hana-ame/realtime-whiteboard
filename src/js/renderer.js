@@ -200,6 +200,12 @@ function getImageObj(el) {
     });
   }
 
+  // 换图（同一 id 换了 dataUrl）时丢弃队列里同 id 的旧 Image：它已被下面
+  // imageCache[el.id] 覆盖、永远不会被绘制，却仍会白解析一次几 MB 的 base64；
+  // 更糟的是旧 Image 的 onload 会执行 loadingImages.delete(el.id)，把新图
+  // "仍在加载"的标记一并抹掉，导致转圈动画提前停止。
+  unqueueImage(el.id);
+
   const img = new Image();
   img._dataUrl = el.dataUrl;
   img._elId = el.id;
