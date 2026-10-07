@@ -38,10 +38,23 @@ concurrency:
 env:
   GO_VERSION: '1.22.x'
 
+# 版本号只在 workflow 顶层解析一次，避免 build 矩阵的 6 个实例并发写
+# GITHUB_OUTPUT 产生竞争。规则：手动输入 > tag 名 > dev-<run#>-<sha7>。
+# 同时得出 is_release，决定要不要真正建 GitHub Release。
+res_version: >-
+  ${{ github.event_name == 'workflow_dispatch' && inputs.version ||
+        (startsWith(github.ref, 'refs/tags/v') && github.ref_name ||
+         format('dev-{0}-{1}', github.run_number, github.sha)) }}
+res_is_release: >-
+  ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+
 jobs:
   build:
     name: build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ env.res_version }}
+      is_release: ${{ env.res_is_release }}
     strategy:
       fail-fast: false
       matrix:
@@ -102,15 +115,15 @@ jobs:
           exe=""
           [ "${{ matrix.goos }}" = "windows" ] && exe=".exe"
           GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=0 \
-            go build -trimpath -ldflags="-s -w -X main.version=v${version}" \
-            -o "room_v${version}_${{ matrix.goos }}_${{ matrix.goarch }}${exe}" .
+            go build -trimpath -ldflags="-s -w -X main.version=v${{ env.res_version }}" \
+            -o "room_v${{ env.res_version }}_${{ matrix.goos }}_${{ matrix.goarch }}${exe}" .
           ls -lh room_v*
 
       - name: Package
         run: |
           set -euo pipefail
           mkdir -p dist
-          base="room_v${version}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          base="room_v${{ env.res_version }}_${{ matrix.goos }}_${{ matrix.goarch }}"
           src="room-go/${base}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
             src="${src}.exe"
@@ -125,7 +138,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: room-server-v${{ steps.vars.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: room-server-v${{ env.res_version }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             dist/room_v*
             dist/SHA256SUMS.txt
@@ -140,19 +153,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Re-resolve version
-        id: vars
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            V="${{ inputs.version }}"
-          else
-            V="${GITHUB_REF#refs/tags/}"
-          fi
-          V="${V#v}"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -170,8 +170,8 @@ jobs:
           find . -maxdepth 2 -type f \( -name 'room_v*' -o -name 'SHA256SUMS.txt' \) | sort
           assets=()
           while IFS= read -r f; do assets+=("$f"); done < <(find . -maxdepth 2 -type f \( -name 'room_v*' -o -name 'SHA256SUMS.txt' \) | sort)
-          gh release create "v${{ steps.vars.outputs.version }}" \
-            --title "room-server v${{ steps.vars.outputs.version }}" \
+          gh release create "v${{ env.res_version }}" \
+            --title "room-server v${{ env.res_version }}" \
             --generate-notes \
             "${assets[@]}"
-          echo "已发布 v${{ steps.vars.outputs.version }}"
+          echo "已发布 v${{ env.res_version }}"
