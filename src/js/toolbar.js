@@ -218,7 +218,7 @@ export function zoomBy(f) {
   requestRender();
 }
 
-function fitToContent() {
+export function fitToContent() {
   const b = contentBounds();
   const cw = b.maxX - b.minX, ch = b.maxY - b.minY;
   const s = clamp(Math.min(state.W / cw, state.H / ch) * 0.85, 0.15, 2);

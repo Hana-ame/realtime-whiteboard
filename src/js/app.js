@@ -8,7 +8,7 @@ import { initRenderer, resize, requestRender, clearImageCache } from './renderer
 import { initInteraction, NOTE_W, NOTE_H } from './interaction.js';
 import { initEditor } from './editor.js';
 import { initNetwork, updatePresence, broadcast } from './network.js';
-import { initToolbar, updateZoomLabel, updateDeleteBtn } from './toolbar.js';
+import { initToolbar, updateZoomLabel, updateDeleteBtn, fitToContent } from './toolbar.js';
 
 setDeps(broadcast, requestRender, clearImageCache, updateDeleteBtn);
 
@@ -34,6 +34,10 @@ function load() {
   resize();
   updateZoomLabel();
   updatePresence();
+  // 如果有已有内容，自动适应视图
+  if (Object.keys(state.elements).length > 0) {
+    fitToContent();
+  }
   requestRender();
 }
 
