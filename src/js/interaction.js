@@ -234,7 +234,7 @@ export function initInteraction() {
 
     if (state.tool === 'connect') {
       const hit = pick(wp);
-      if (hit && hit.type === 'note') {
+      if (hit && (hit.type === 'note' || hit.type === 'image')) {
         state.connectFrom = hit.id;
         state.drag = { mode: 'connect', pointerId: e.pointerId };
       }
@@ -399,7 +399,7 @@ export function initInteraction() {
       const sp = getPos(e, canvas);
       const wp = screenToWorld(sp.x, sp.y, state.view);
       const hit = pick(wp);
-      if (state.connectFrom && hit && hit.type === 'note' && hit.id !== state.connectFrom) {
+      if (state.connectFrom && hit && (hit.type === 'note' || hit.type === 'image') && hit.id !== state.connectFrom) {
         pushUndo();
         const c = { id: uid(), type: 'connection', from: state.connectFrom, to: hit.id, color: state.connColor, rev: 0 };
         upsert(c);
