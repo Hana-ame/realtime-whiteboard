@@ -1,7 +1,7 @@
 import { Peer } from 'peerjs';
 import { state, peers, peerId, peerName, peerColor, persist } from './state.js';
 import { uid, toast, deepCopy } from './utils.js';
-import { requestRender } from './renderer.js';
+import { requestRender, clearImageCache } from './renderer.js';
 
 let peer = null;
 let myId = null;
@@ -227,6 +227,7 @@ function handleMsg(m, conn) {
     }
   } else if (m.t === 'delete') {
     if (state.elements[m.id]) {
+      if (state.elements[m.id].type === 'image') clearImageCache(m.id);
       delete state.elements[m.id];
       if (state.selectedId === m.id) state.selectedId = null;
       persist();
@@ -234,6 +235,10 @@ function handleMsg(m, conn) {
     }
   } else if (m.t === 'state') {
     if (m.fullSync) {
+      // Clear caches for removed image elements before wholesale replacement
+      for (const id in state.elements) {
+        if (state.elements[id].type === 'image') clearImageCache(id);
+      }
       state.elements = m.elements || {};
     } else {
       for (const id in m.elements) {

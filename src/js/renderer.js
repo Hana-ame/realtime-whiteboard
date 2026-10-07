@@ -189,6 +189,7 @@ function drawNote(n) {
   ctx.fill();
   ctx.restore();
   
+  ctx.save();
   ctx.fillStyle = '#1c1f2b';
   ctx.font = `${NOTE_FONT}px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif`;
   ctx.textBaseline = 'top';

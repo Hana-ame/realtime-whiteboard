@@ -112,6 +112,7 @@ export function contentBounds() {
     if (el.type === 'note' || el.type === 'image') {
       x0 = el.x; y0 = el.y; x1 = el.x + el.w; y1 = el.y + el.h;
     } else if (el.type === 'stroke') {
+      if (!el.points || el.points.length === 0) continue;
       for (const pt of el.points) {
         x0 = Math.min(x0 ?? pt.x, pt.x);
         y0 = Math.min(y0 ?? pt.y, pt.y);
@@ -441,6 +442,9 @@ export function initInteraction() {
 
   window.addEventListener('keydown', e => {
     if (state.editingId != null) return;
+    // Ignore shortcuts when typing in an input/textarea
+    const tag = e.target && e.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
     if (e.code === 'Space') {
       state.spaceDown = true;
       stage.classList.add('space');
@@ -506,7 +510,7 @@ export function initInteraction() {
             offCanvas.height = targetH;
             const offCtx = offCanvas.getContext('2d');
             offCtx.drawImage(img, 0, 0, targetW, targetH);
-            const optimizedDataUrl = offCanvas.toDataURL('image/jpeg', 0.85);
+            const optimizedDataUrl = offCanvas.toDataURL('image/png');
 
             // 画布上显示的适中初始尺寸
             const displayMax = 320;
@@ -519,8 +523,11 @@ export function initInteraction() {
 
             // 放置在当前鼠标/光标世界坐标，或视口中心
             const center = screenToWorld(state.W / 2, state.H / 2, state.view);
-            const posX = state.pointerWorld ? state.pointerWorld.x - dw / 2 : center.x - dw / 2;
-            const posY = state.pointerWorld ? state.pointerWorld.y - dh / 2 : center.y - dh / 2;
+            const hasMoved = state.pointerWorld.x !== 0 || state.pointerWorld.y !== 0;
+            const px = hasMoved ? state.pointerWorld.x : center.x;
+            const py = hasMoved ? state.pointerWorld.y : center.y;
+            const posX = px - dw / 2;
+            const posY = py - dh / 2;
 
             pushUndo();
             const imageEl = {

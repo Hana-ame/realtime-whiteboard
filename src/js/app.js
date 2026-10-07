@@ -4,13 +4,13 @@
  */
 
 import { state, NOTE_COLORS, persist, setDeps } from './state.js';
-import { initRenderer, resize, requestRender } from './renderer.js';
+import { initRenderer, resize, requestRender, clearImageCache } from './renderer.js';
 import { initInteraction, NOTE_W, NOTE_H } from './interaction.js';
 import { initEditor } from './editor.js';
 import { initNetwork, updatePresence, broadcast } from './network.js';
 import { initToolbar, updateZoomLabel } from './toolbar.js';
 
-setDeps(broadcast, requestRender);
+setDeps(broadcast, requestRender, clearImageCache);
 
 function load() {
   try {

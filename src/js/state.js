@@ -36,10 +36,12 @@ export const peers = {};
 
 let _broadcastFn = null;
 let _requestRenderFn = null;
+let _clearImageCacheFn = null;
 
-export function setDeps(broadcastFn, requestRenderFn) {
+export function setDeps(broadcastFn, requestRenderFn, clearImageCacheFn) {
   _broadcastFn = broadcastFn;
   _requestRenderFn = requestRenderFn;
+  _clearImageCacheFn = clearImageCacheFn;
 }
 
 /**
@@ -111,6 +113,8 @@ export function upsert(el, doBroadcast = true) {
  */
 export function removeEl(id, doBroadcast = true) {
   if (!state.elements[id]) return;
+  const el = state.elements[id];
+  if (el.type === 'image' && _clearImageCacheFn) _clearImageCacheFn(id);
   delete state.elements[id];
   if (state.selectedId === id) state.selectedId = null;
 

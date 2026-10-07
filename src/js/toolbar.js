@@ -90,6 +90,7 @@ export function selectTool(t) {
   document.getElementById('ctx-pen').classList.toggle('hidden', t !== 'pen');
   document.getElementById('stage').className = 'stage tool-' + t;
   if (t !== 'connect') state.connectFrom = null;
+  requestRender();
 }
 
 export function updateZoomLabel() {
