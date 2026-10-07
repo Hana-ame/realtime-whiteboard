@@ -111,16 +111,15 @@ func main() {
 				fmt.Printf("[room] OFFER from %s (conn: %s)\n", srcPeer, connID)
 
 				// Parse SDP type
+				// Parse SDP type
 				var sdpTypeParsed webrtc.SDPType
 				switch sdpType {
 				case "offer":
 					sdpTypeParsed = webrtc.SDPTypeOffer
 				case "answer":
 					sdpTypeParsed = webrtc.SDPTypeAnswer
-				case "pranswer":
-					sdpTypeParsed = webrtc.SDPTypePrAnswer
-				case "rollback":
-					sdpTypeParsed = webrtc.SDPTypeRollback
+				default:
+					sdpTypeParsed = webrtc.SDPType(sdpType)
 				}
 
 				if err := pc.SetRemoteDescription(webrtc.SessionDescription{
@@ -185,10 +184,16 @@ func main() {
 		if candidate == nil {
 			return
 		}
+		// Marshal ICECandidate to get the candidate string
+		candJSON, _ := json.Marshal(candidate)
+		var candMap map[string]interface{}
+		json.Unmarshal(candJSON, &candMap)
+		candidateStr, _ := candMap["candidate"].(string)
+
 		candidateMsg := map[string]interface{}{
 			"type": "CANDIDATE",
 			"payload": map[string]interface{}{
-				"candidate": candidate.Candidate,
+				"candidate": candidateStr,
 			},
 		}
 		jsonMsg, _ := json.Marshal(candidateMsg)
