@@ -3,7 +3,7 @@
  * @module editor
  */
 
-import { state, upsert } from './state.js';
+import { state, upsert, pushUndo } from './state.js';
 import { worldToScreen } from './utils.js';
 import { NOTE_FONT } from './renderer.js';
 
@@ -30,18 +30,26 @@ export function initEditor() {
   });
 }
 
-export function openEditor(n) {
-  state.editingId = n.id;
+export function positionEditor(n) {
   const tl = worldToScreen(n.x, n.y, state.view);
-  editor.style.display = 'block';
+  const s = state.view.scale;
   editor.style.left = tl.x + 'px';
   editor.style.top = tl.y + 'px';
-  editor.style.width = (n.w * state.view.scale) + 'px';
-  editor.style.height = (n.h * state.view.scale) + 'px';
-  editor.style.fontSize = (NOTE_FONT * state.view.scale) + 'px';
-  editor.style.color = '#1c1f2b';
+  editor.style.width = (n.w * s) + 'px';
+  editor.style.height = (n.h * s) + 'px';
+  editor.style.fontSize = (NOTE_FONT * s) + 'px';
+  editor.style.padding = (10 * s) + 'px';
+  editor.style.lineHeight = '1.32';
+  editor.style.borderRadius = (12 * s) + 'px';
   editor.style.background = n.color;
-  editor.style.borderRadius = '12px';
+}
+
+export function openEditor(n) {
+  state.editingId = n.id;
+  pushUndo();
+  editor.style.display = 'block';
+  positionEditor(n);
+  editor.style.color = '#1c1f2b';
   editor.value = n.text || '';
   editor.focus();
   editor.select();

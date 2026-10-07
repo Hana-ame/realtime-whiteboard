@@ -3,10 +3,10 @@
  * @module interaction
  */
 
-import { state, pushUndo, removeEl, upsert, undo, redo } from './state.js';
+import { state, pushUndo, removeEl, upsert, undo, redo, undoStack } from './state.js';
 import { screenToWorld, worldToScreen, uid, clamp, toast } from './utils.js';
 import { requestRender, NOTE_FONT, clearImageCache } from './renderer.js';
-import { openEditor, closeEditor } from './editor.js';
+import { openEditor, closeEditor, positionEditor } from './editor.js';
 import { broadcastCursor, broadcastThrottled, clearThrottled } from './network.js';
 import { selectTool, updateZoomLabel, updateDeleteBtn } from './toolbar.js';
 
@@ -150,11 +150,35 @@ export function initInteraction() {
     const panMode = state.tool === 'pan' || state.spaceDown || e.button === 1;
 
     if (panMode) {
-      state.drag = { mode: 'pan', sx: sp.x, sy: sp.y, vx: state.view.x, vy: state.view.y };
+      state.drag = { mode: 'pan', sx: sp.x, sy: sp.y, vx: state.view.x, vy: state.view.y, pointerId: e.pointerId };
       stage.classList.add('panning');
       return;
     }
     if (e.button === 2) return;
+
+    // Resize handle check (before tool-specific handlers so it works in any tool)
+    if (state.selectedId && state.elements[state.selectedId]) {
+      const sel = state.elements[state.selectedId];
+      if (sel.type === 'note' || sel.type === 'image') {
+        const hk = hitHandle(sel, sp);
+        if (hk) {
+          pushUndo();
+          state.drag = {
+            mode: 'resize',
+            id: sel.id,
+            hk: hk,
+            origX: sel.x,
+            origY: sel.y,
+            origW: sel.w,
+            origH: sel.h,
+            startWp: { x: wp.x, y: wp.y },
+            pointerId: e.pointerId
+          };
+          requestRender();
+          return;
+        }
+      }
+    }
 
     if (state.tool === 'note') {
       const hit = pick(wp);
@@ -163,7 +187,7 @@ export function initInteraction() {
         updateDeleteBtn();
         selectTool('select');
         pushUndo();
-        state.drag = { mode: 'move', id: hit.id, dx: wp.x - hit.x, dy: wp.y - hit.y, moved: false };
+        state.drag = { mode: 'move', id: hit.id, dx: wp.x - hit.x, dy: wp.y - hit.y, moved: false, pointerId: e.pointerId };
       } else {
         pushUndo();
         const n = {
@@ -189,7 +213,7 @@ export function initInteraction() {
         color: state.penColor, width: state.penSize, rev: 0
       };
       state.elements[s.id] = s;
-      state.drag = { mode: 'draw', id: s.id };
+      state.drag = { mode: 'draw', id: s.id, pointerId: e.pointerId };
       upsert(s, true);
       return;
     }
@@ -198,7 +222,7 @@ export function initInteraction() {
       const hit = pick(wp);
       if (hit && hit.type === 'note') {
         state.connectFrom = hit.id;
-        state.drag = { mode: 'connect' };
+        state.drag = { mode: 'connect', pointerId: e.pointerId };
       }
       return;
     }
@@ -207,27 +231,9 @@ export function initInteraction() {
     if (!hit) {
       state.selectedId = null;
       updateDeleteBtn();
-      state.drag = { mode: 'pan', sx: sp.x, sy: sp.y, vx: state.view.x, vy: state.view.y };
+      state.drag = { mode: 'pan', sx: sp.x, sy: sp.y, vx: state.view.x, vy: state.view.y, pointerId: e.pointerId };
       requestRender();
       return;
-    }
-    
-    if ((hit.type === 'note' || hit.type === 'image') && state.selectedId === hit.id) {
-      const hk = hitHandle(hit, sp);
-      if (hk) {
-        pushUndo();
-        state.drag = {
-          mode: 'resize',
-          id: hit.id,
-          hk: hk,
-          origX: hit.x,
-          origY: hit.y,
-          origW: hit.w,
-          origH: hit.h,
-          startWp: { x: wp.x, y: wp.y }
-        };
-        return;
-      }
     }
     
     state.selectedId = hit.id;
@@ -240,7 +246,8 @@ export function initInteraction() {
       state.drag = {
         mode: 'move-el', id: hit.id,
         sx: wp.x, sy: wp.y,
-        orig: hit.points.map(p => ({ x: p.x, y: p.y })), moved: false
+        orig: hit.points.map(p => ({ x: p.x, y: p.y })), moved: false,
+        pointerId: e.pointerId
       };
     }
     requestRender();
@@ -253,10 +260,15 @@ export function initInteraction() {
     broadcastCursor(wp);
     
     if (!state.drag) return;
+    if (state.drag.pointerId !== e.pointerId) return;
     
     if (state.drag.mode === 'pan') {
       state.view.x = state.drag.vx + (sp.x - state.drag.sx);
       state.view.y = state.drag.vy + (sp.y - state.drag.sy);
+      if (state.editingId != null) {
+        const n = state.elements[state.editingId];
+        if (n) positionEditor(n);
+      }
       requestRender();
       return;
     }
@@ -325,6 +337,7 @@ export function initInteraction() {
       n.y = Math.round(ny);
       n.w = Math.round(nw);
       n.h = Math.round(nh);
+      state.drag.moved = true;
       state.elements[n.id] = n;
       broadcastThrottled(n);
       requestRender();
@@ -348,6 +361,7 @@ export function initInteraction() {
 
   canvas.addEventListener('pointerup', e => {
     if (!state.drag) return;
+    if (state.drag.pointerId !== e.pointerId) return;
     const mode = state.drag.mode;
     const dragId = state.drag.id;
     const moved = state.drag.moved;
@@ -363,6 +377,9 @@ export function initInteraction() {
       const el = state.elements[dragId];
       if (el && moved) {
         upsert(el);
+      } else if (!moved && undoStack.length) {
+        // Click without movement — pop phantom undo entry
+        undoStack.pop();
       }
     } else if (mode === 'connect') {
       const sp = getPos(e, canvas);
@@ -382,7 +399,13 @@ export function initInteraction() {
 
   canvas.addEventListener('pointercancel', () => {
     if (state.drag) {
-      if (state.drag.id) clearThrottled(state.drag.id);
+      if (state.drag.id) {
+        // Persist partial changes before clearing drag
+        if (state.drag.moved && state.elements[state.drag.id]) {
+          upsert(state.elements[state.drag.id]);
+        }
+        clearThrottled(state.drag.id);
+      }
       state.drag = null;
       stage.classList.remove('panning');
       requestRender();
@@ -429,6 +452,11 @@ export function initInteraction() {
       // 双指平移模式（跟手平滑平移）
       state.view.x -= e.deltaX;
       state.view.y -= e.deltaY;
+    }
+    // Re-position editor if editing
+    if (state.editingId != null) {
+      const n = state.elements[state.editingId];
+      if (n) positionEditor(n);
     }
     requestRender();
   }, { passive: false });
@@ -603,6 +631,10 @@ export function initInteraction() {
     state.view.x = pinchState.cx - anchor.x * newScale + (c.x - pinchState.cx);
     state.view.y = pinchState.cy - anchor.y * newScale + (c.y - pinchState.cy);
     updateZoomLabel();
+    if (state.editingId != null) {
+      const n = state.elements[state.editingId];
+      if (n) positionEditor(n);
+    }
     requestRender();
     e.preventDefault();
   }, { passive: false });

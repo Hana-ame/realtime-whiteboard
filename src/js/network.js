@@ -1,5 +1,5 @@
 import { Peer } from 'peerjs';
-import { state, peers, peerId, peerName, peerColor, persist } from './state.js';
+import { state, peers, peerId, peerName, peerColor, persist, removeEl } from './state.js';
 import { uid, toast, deepCopy } from './utils.js';
 import { requestRender, clearImageCache } from './renderer.js';
 
@@ -7,6 +7,7 @@ let peer = null;
 let myId = null;
 const conns = {};
 const seen = new Set();
+const tombstones = new Set();
 let lastCursor = 0;
 const _bcache = {};
 
@@ -207,39 +208,64 @@ function handleMsg(m, conn) {
   if (m.t === 'upsert') {
     const el = m.el;
     if (!el || !el.id) return;
-    // Don't let remote live-move overwrite what this user is actively dragging locally
-    if (state.drag && state.drag.id === el.id && el._isLiveMove) {
-      return;
-    }
+    // Reject upsert for tombstoned (deleted) elements
+    if (tombstones.has(el.id)) return;
+    // Block ALL remote updates to locally-dragged elements
+    if (state.drag && state.drag.id === el.id) return;
     const cur = state.elements[el.id];
     // Preserve heavy image dataUrl if stripped during live drag
     if (cur && cur.type === 'image' && cur.dataUrl && !el.dataUrl) {
       el.dataUrl = cur.dataUrl;
     }
-    // Accept if it's a live move, or no local element, or incoming rev is >= local rev
-    if (!cur || el._isLiveMove || (el.rev || 0) >= (cur.rev || 0)) {
-      if (cur && (cur.rev || 0) > (el.rev || 0)) {
-        el.rev = cur.rev;
+    if (!cur || el._isLiveMove || (el.rev || 0) > (cur.rev || 0)) {
+      if (el._isLiveMove && cur) {
+        // Only update geometry during live moves; preserve non-geometry (text, color, dataUrl)
+        if ((cur.rev || 0) > (el.rev || 0)) el.rev = cur.rev;
+        Object.assign(cur, { x: el.x, y: el.y, w: el.w, h: el.h, points: el.points });
+      } else {
+        state.elements[el.id] = el;
       }
-      state.elements[el.id] = el;
       if (!el._isLiveMove) persist();
       requestRender();
     }
   } else if (m.t === 'delete') {
     if (state.elements[m.id]) {
-      if (state.elements[m.id].type === 'image') clearImageCache(m.id);
-      delete state.elements[m.id];
-      if (state.selectedId === m.id) state.selectedId = null;
-      persist();
-      requestRender();
+      tombstones.add(m.id);
+      clearThrottled(m.id);
+      removeEl(m.id, false);
     }
   } else if (m.t === 'state') {
     if (m.fullSync) {
-      // Clear caches for removed image elements before wholesale replacement
+      // Preserve local drag position during fullSync to avoid position jumps
+      const dragId = state.drag && state.drag.id;
+      const dragPos = dragId && state.elements[dragId]
+        ? { x: state.elements[dragId].x, y: state.elements[dragId].y } : null;
+      // Merge per-element with rev comparison; preserve newer local data
+      const incoming = m.elements || {};
+      // Clear caches for images being replaced
       for (const id in state.elements) {
-        if (state.elements[id].type === 'image') clearImageCache(id);
+        const cur = state.elements[id];
+        const inc = incoming[id];
+        if (cur.type === 'image' && (!inc || (inc.rev || 0) >= (cur.rev || 0))) {
+          clearImageCache(id);
+        }
       }
-      state.elements = m.elements || {};
+      // Apply incoming elements only if they have higher rev (or don't exist locally)
+      for (const id in incoming) {
+        const el = incoming[id];
+        const cur = state.elements[id];
+        tombstones.delete(id); // Element exists in sync — clear tombstone
+        if (!cur || (el.rev || 0) > (cur.rev || 0)) {
+          state.elements[id] = el;
+        }
+      }
+      // Remove elements that exist locally but not in sync AND are not locally newer
+      // (don't delete — a stale sync might just be missing them)
+      // Restore drag position if it was displaced by fullSync
+      if (dragId && dragPos && state.elements[dragId]) {
+        state.elements[dragId].x = dragPos.x;
+        state.elements[dragId].y = dragPos.y;
+      }
     } else {
       for (const id in m.elements) {
         const el = m.elements[id];
@@ -337,7 +363,7 @@ export function broadcastThrottled(el) {
     c.timer = setTimeout(() => {
       c.timer = null;
       c.lastTime = performance.now();
-      if (c.payload) {
+      if (c.payload && state.elements[c.payload.id]) {
         broadcast({ t: 'upsert', el: c.payload });
         c.payload = null;
       }
