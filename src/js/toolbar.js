@@ -134,7 +134,8 @@ export function selectTool(t) {
   document.getElementById('ctx-note').classList.toggle('hidden', t !== 'note');
   document.getElementById('ctx-pen').classList.toggle('hidden', t !== 'pen');
   document.getElementById('ctx-connect').classList.toggle('hidden', t !== 'connect');
-  document.getElementById('ctx-bar').classList.toggle('visible', t === 'note' || t === 'pen' || t === 'connect');
+  const bar = document.getElementById('ctx-bar');
+  if (bar) bar.classList.toggle('empty', t !== 'note' && t !== 'pen' && t !== 'connect' && !state.selectedId);
   document.getElementById('stage').className = 'stage tool-' + t;
   if (t !== 'connect') state.connectFrom = null;
   requestRender();
@@ -151,11 +152,11 @@ export function updateDeleteBtn() {
     document.getElementById('note-font-size').value = fs;
     document.getElementById('note-font-size-val').textContent = fs;
   }
-  // Show ctx-bar if selection exists or tool-specific settings are active
+  // Toggle empty state on ctx-bar
   const bar = document.getElementById('ctx-bar');
   if (bar) {
     const toolActive = state.tool === 'note' || state.tool === 'pen' || state.tool === 'connect';
-    bar.classList.toggle('visible', toolActive || !!state.selectedId);
+    bar.classList.toggle('empty', !toolActive && !state.selectedId);
   }
 }
 

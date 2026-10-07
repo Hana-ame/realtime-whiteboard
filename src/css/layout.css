@@ -6,13 +6,13 @@
   flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;
 }
 .ctx-bar{
-  display:none;flex:0 0 auto;background:var(--bar-2);color:var(--txt);
+  display:flex;flex:0 0 auto;background:var(--bar-2);color:var(--txt);
   align-items:center;gap:10px;padding:5px 14px;
   border-bottom:1px solid var(--bar-line);z-index:19;
   flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;
-  min-height:36px;
+  min-height:38px;transition:opacity .15s;
 }
-.ctx-bar.visible{display:flex;}
+.ctx-bar.empty{opacity:.3;}
 .brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:15px;letter-spacing:.3px;}
 .brand .dot{width:11px;height:11px;border-radius:3px;background:linear-gradient(135deg,#4c8bf5,#7c5cff);box-shadow:0 0 0 3px rgba(76,139,245,.18);}
 .brand small{color:var(--muted);font-weight:400;font-size:12px;}
