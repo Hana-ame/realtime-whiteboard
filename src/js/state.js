@@ -26,7 +26,19 @@ export const state = {
   pointerWorld: {x:0, y:0},
   editingId: null,
   W: 0,
-  H: 0
+  H: 0,
+  // Mutation counter: bumped on every structural change (add/remove/re-z/replace
+  // of elements). renderer.js caches sorted-id order, the grid pattern and the
+  // minimap contentBounds on it, so it MUST be bumped whenever state.elements
+  // membership or z-order can change — including wholesale replacement (undo/
+  // redo/fullSync/room switch).
+  __mut: 0,
+  // 当前画布是否属于"自己"（自己的房间 = 无 room= hash，或 hash 就是自己的
+  // PeerJS id）。进入别人的房间（URL room= / 手动输入 remoteId）时置 false：
+  // persist() 自动失效，收到的别人的画布只在内存处理、绝不写 localStorage，
+  // 否则下次自己打开看到的是别人的画布。hash 清空切回自己的房间时恢复 true，
+  // 并把自己的画布写回 localStorage。
+  persistable: true
 };
 
 export const undoStack = [];
@@ -72,6 +84,9 @@ export function setDeps(broadcastFn, requestRenderFn, clearImageCacheFn, updateD
  * Persist elements to local storage
  */
 export function persist() {
+  // 别人的画布只在内存：进入别人的房间（persistable=false）后，任何 upsert /
+  // fullSync / 删除都不许落盘，否则下次自己打开画布看到的是别人的内容。
+  if (!state.persistable) return;
   try {
     localStorage.setItem(persistKey, JSON.stringify(state.elements));
   } catch(e) {}
@@ -102,6 +117,7 @@ export function undo() {
   }
   state.elements = restored;
   state.selectedId = null;
+  state.__mut++; // 整幅替换：sortedIds / contentBounds 缓存必须失效
   persist();
   // 刻意不广播：undo 是本地历史。广播全量快照会覆盖别人并发的改动，
   // 而且旧快照里还留着已删元素，会触发"删除复活"（见 network.js fullSync 分支）
@@ -125,6 +141,7 @@ export function redo() {
   }
   state.elements = restored;
   state.selectedId = null;
+  state.__mut++; // 整幅替换：sortedIds / contentBounds 缓存必须失效
   persist();
   if (_requestRenderFn) _requestRenderFn();
   if (_updateDeleteBtnFn) _updateDeleteBtnFn();
@@ -146,6 +163,7 @@ export function upsert(el, doBroadcast = true) {
   el.cid = selfPeerId || el.cid || '';
   delete el._isLiveMove;
   state.elements[el.id] = el;
+  state.__mut++; // 新增元素/替换/z 变化都会影响排序，sortedIds 缓存必须失效
   persist();
   if (doBroadcast && _broadcastFn) _broadcastFn({ t: 'upsert', el: el });
   if (_requestRenderFn) _requestRenderFn();
@@ -196,6 +214,7 @@ export function removeEl(id, doBroadcast = true) {
     if (doBroadcast && _broadcastFn) _broadcastFn({t: 'delete', id: connId});
   });
 
+  state.__mut++; // 删除元素（含关联连线）：sortedIds / contentBounds 缓存必须失效
   persist();
   if (doBroadcast && _broadcastFn) _broadcastFn({t: 'delete', id: id});
   if (_requestRenderFn) _requestRenderFn();

@@ -295,7 +295,13 @@ function onPeerOpen(id, fromStorage) {
   toast('已上线，可邀请好友同屏协作');
 
   const target = roomFromHash();
-  if (target && target !== id) joinRoomFromUrl(target);
+  if (target && target !== id) {
+    // 通过 URL room= 进别人的房间：画布完全在内存处理，绝不写 localStorage。
+    // 之后收到的 fullSync/upsert 只进 state.elements，persist() 因 persistable=false
+    // 自动落空，下次自己打开仍是自己的画布。
+    state.persistable = false;
+    joinRoomFromUrl(target);
+  }
 }
 
 function joinRoomFromUrl(targetRoomId) {
@@ -312,19 +318,38 @@ export function initNetwork() {
 
   window.addEventListener('hashchange', () => {
     const newRoom = roomFromHash();
-    // 切到另一个房间：当前房间的内容存回它自己的缓存，再清空画布载入新房间的缓存。
-    // 刻意不广播 delete——那些元素不属于"我"，广播出去会让上一个房间的人跟着丢内容。
+    // 自己的房间 = hash 为空，或 hash 指向自己的 PeerJS id
+    const ownHash = !newRoom || newRoom === myId;
+    // 切到另一个房间：若还在自己的房间，先把画布存回自己的 key（在别人的房间里
+    // persistable 已是 false，persist() 自动不落盘），再清空画布。刻意不广播
+    // delete——那些元素不属于"我"，广播出去会让上一个房间的人跟着丢内容。
     // 自己的房间号不触发（点"分享链接"复制的是我自己的 id，不算换房间）。
     if (newRoom && newRoom !== myId && newRoom !== getRoomKey()) {
       persist();
+      state.persistable = false;
       state.elements = {};
       state.selectedId = null;
+      state.__mut++; // 整幅替换：sortedIds / contentBounds 缓存必须失效
       const newKey = 'wb-elements-v2:' + newRoom;
       setPersistKey(newKey);
+      // 别人的房间内容只通过网络同步。不读该 key 的本地旧内容——即便是旧方案
+      // 残留的，也不是"我"的画布，读进来会显示成别人的旧画布。
+      requestRender();
+    } else if (ownHash && !state.persistable) {
+      // hash 清空（或指向自己）= 切回自己的房间：恢复可持久化，加载并写回自己
+      // 的画布。绝不把别人的元素写进 localStorage——只持久化自己的元素。
+      const myKey = 'wb-elements-v2:' + (myId || 'default');
+      setPersistKey(myKey);
       try {
-        const raw = localStorage.getItem(newKey);
-        if (raw) state.elements = JSON.parse(raw) || {};
-      } catch (e) {}
+        const raw = localStorage.getItem(myKey);
+        state.elements = raw ? (JSON.parse(raw) || {}) : {};
+      } catch (e) {
+        state.elements = {};
+      }
+      state.selectedId = null;
+      state.__mut++; // 整幅替换：sortedIds / contentBounds 缓存必须失效
+      state.persistable = true;
+      persist();
       requestRender();
     }
     if (newRoom && newRoom !== myId && !conns[newRoom]) joinRoomFromUrl(newRoom);
@@ -395,6 +420,9 @@ export function initNetwork() {
     if (!v) return;
     if (v === myId) { toast('不能连接自己'); return; }
     if (conns[v] && conns[v]._opened) { toast('已连接'); return; }
+    // 手动输入 remoteId 加入 = 进入别人的房间：收到的画布只在内存处理，不写
+    // localStorage；否则下次自己打开看到的是别人的画布。
+    state.persistable = false;
     connectToPeer(v, true);
     toast('正在连接…');
   });
@@ -512,6 +540,9 @@ function handleMsg(m, conn) {
         if ((cur.rev || 0) > (el.rev || 0)) el.rev = cur.rev;
         Object.assign(cur, { x: el.x, y: el.y, w: el.w, h: el.h, points: el.points });
       } else {
+        // 新增元素或网络 upsert 覆盖：可能改变排序结果（包括对方 bringToFront
+        // 随 upsert 带过来的 z 变化），sortedIds / contentBounds 缓存必须失效。
+        state.__mut++;
         state.elements[el.id] = el;
       }
       if (!el._isLiveMove) persist();
@@ -566,6 +597,10 @@ function handleMsg(m, conn) {
         if (!cur || beats(el, cur)) state.elements[id] = el;
       }
     }
+    // fullSync / 增量同步合并后整幅可能已经变化：sortedIds / contentBounds 缓存
+    // 必须失效（persist() 内部由 persistable 控制是否落盘，别人的画布不会写进
+    // localStorage）。
+    state.__mut++;
     persist();
     requestRender();
   } else if (m.t === 'request') {
