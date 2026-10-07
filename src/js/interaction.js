@@ -3,7 +3,7 @@
  * @module interaction
  */
 
-import { state, pushUndo, removeEl, upsert, undo, redo, undoStack } from './state.js';
+import { state, pushUndo, removeEl, upsert, bringToFront, undo, redo, undoStack } from './state.js';
 import { screenToWorld, worldToScreen, uid, clamp, toast } from './utils.js';
 import { requestRender, clearImageCache } from './renderer.js';
 import { openEditor, closeEditor, positionEditor } from './editor.js';
@@ -185,6 +185,7 @@ export function initInteraction() {
       const hit = pick(wp);
       if (hit && hit.type === 'note') {
         state.selectedId = hit.id;
+        bringToFront(hit.id);
         updateDeleteBtn();
         selectTool('select');
         pushUndo();
@@ -198,6 +199,7 @@ export function initInteraction() {
       const hit = pick(wp);
       if (hit && hit.type === 'note') {
         state.selectedId = hit.id;
+        bringToFront(hit.id);
         updateDeleteBtn();
         selectTool('select');
         pushUndo();
@@ -251,6 +253,7 @@ export function initInteraction() {
     }
     
     state.selectedId = hit.id;
+    bringToFront(hit.id);
     updateDeleteBtn();
     if (hit.type === 'note' || hit.type === 'image') {
       pushUndo();
@@ -432,6 +435,7 @@ export function initInteraction() {
     const hit = pick(wp);
     if (hit && hit.type === 'note') {
       state.selectedId = hit.id;
+      bringToFront(hit.id);
       updateDeleteBtn();
       openEditor(hit);
     }

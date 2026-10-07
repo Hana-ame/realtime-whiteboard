@@ -115,6 +115,18 @@ export function upsert(el, doBroadcast = true) {
 }
 
 /**
+ * Bring an element to the front (top of z-order) by re-inserting it
+ */
+export function bringToFront(id) {
+  if (!state.elements[id]) return;
+  const el = state.elements[id];
+  delete state.elements[id];
+  state.elements[id] = el;
+  persist();
+  if (_requestRenderFn) _requestRenderFn();
+}
+
+/**
  * Remove an element by id
  * @param {string} id 
  * @param {boolean} doBroadcast 
