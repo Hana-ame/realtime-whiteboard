@@ -183,7 +183,7 @@ function drawImageEl(el) {
 
 function drawNote(n) {
   ctx.save();
-  ctx.globalAlpha = 0.88;
+  ctx.globalAlpha = (n.bgOpacity ?? 88) / 100;
   ctx.shadowColor = 'rgba(20,24,40,.16)';
   ctx.shadowBlur = 14;
   ctx.shadowOffsetY = 5;
@@ -193,7 +193,7 @@ function drawNote(n) {
   ctx.restore();
   
   ctx.save();
-  ctx.globalAlpha = 0.72;
+  ctx.globalAlpha = (n.textOpacity ?? 72) / 100;
   ctx.fillStyle = '#1c1f2b';
   const fs = n.fontSize || 16;
   ctx.font = `${fs}px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif`;

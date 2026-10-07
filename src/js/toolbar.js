@@ -77,6 +77,34 @@ export function initToolbar() {
     requestRender();
   });
 
+  // Note background opacity slider (0-100%)
+  const bgOpSlider = document.getElementById('note-bg-opacity');
+  const bgOpVal = document.getElementById('note-bg-opacity-val');
+  bgOpSlider.addEventListener('input', e => {
+    state.noteBgOpacity = +e.target.value;
+    bgOpVal.textContent = state.noteBgOpacity;
+    if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
+      pushUndo();
+      state.elements[state.selectedId].bgOpacity = state.noteBgOpacity;
+      upsert(state.elements[state.selectedId]);
+    }
+    requestRender();
+  });
+
+  // Note text opacity slider (0-100%)
+  const textOpSlider = document.getElementById('note-text-opacity');
+  const textOpVal = document.getElementById('note-text-opacity-val');
+  textOpSlider.addEventListener('input', e => {
+    state.noteTextOpacity = +e.target.value;
+    textOpVal.textContent = state.noteTextOpacity;
+    if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
+      pushUndo();
+      state.elements[state.selectedId].textOpacity = state.noteTextOpacity;
+      upsert(state.elements[state.selectedId]);
+    }
+    requestRender();
+  });
+
   // Connection color swatches
   const CONN_COLORS = ['#9aa0b4','#e23b3b','#1f8a4c','#2b6fe2','#f59e0b','#8b3bd6','#1c1f2b'];
   const cs = document.getElementById('conn-swatches');
@@ -159,6 +187,14 @@ export function updateDeleteBtn() {
     const FS_MIN = 10, FS_MAX = 960, FS_LOG = Math.log(FS_MAX / FS_MIN);
     document.getElementById('note-font-size').value = Math.round(100 * Math.log(Math.max(FS_MIN, fs) / FS_MIN) / FS_LOG);
     document.getElementById('note-font-size-val').textContent = fs;
+    const bgOp = el.bgOpacity ?? 88;
+    state.noteBgOpacity = bgOp;
+    document.getElementById('note-bg-opacity').value = bgOp;
+    document.getElementById('note-bg-opacity-val').textContent = bgOp;
+    const textOp = el.textOpacity ?? 72;
+    state.noteTextOpacity = textOp;
+    document.getElementById('note-text-opacity').value = textOp;
+    document.getElementById('note-text-opacity-val').textContent = textOp;
   }
   // Toggle empty state on ctx-bar
   const bar = document.getElementById('ctx-bar');

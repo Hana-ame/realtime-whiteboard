@@ -17,6 +17,8 @@ export const state = {
   penColor: PEN_COLORS[1],
   penSize: 4,
   noteFontSize: 16, // default for new notes
+  noteBgOpacity: 88, // background opacity percent
+  noteTextOpacity: 72, // text opacity percent
   connColor: '#9aa0b4',
   drag: null,
   spaceDown: false,
