@@ -25,12 +25,15 @@
 //	room -http 0                  # 关闭状态 HTTP 接口
 //
 // 房间号即 PeerJS peer id，需匹配 ^[A-Za-z0-9]+([ _-][A-Za-z0-9]+)*$。
-// 收到 ID-TAKEN 说明房间号已被占用，程序退出；云端信令是负载均衡集群，
-// 唯一性需要使用者自己保证只跑一个实例。
+// 房间号在信令服务器上是全局唯一的：重复注册时我们会收到 ID-TAKEN 然后退出并
+// 返回非零退出码，绝不会与另一个实例挤在同一房间里。云端 0.peerjs.com 也强制
+// 去重，不需要使用者自己协调唯一性。要崩溃自愈就在外面套进程守护
+// （systemd Restart=always 或 docker restart: unless-stopped），那是重试该待的地方。
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -96,6 +99,10 @@ func main() {
 
 	if err := srv.Run(ctx); err != nil {
 		log.Printf("运行结束：%v", err)
+		// 撞名是配置问题，不是临时故障：用非零退出码让进程守护能看出来。
+		if errors.Is(err, errIDTaken) {
+			os.Exit(1)
+		}
 	}
 }
 

@@ -34,6 +34,10 @@ const (
 
 var errNotConnected = errors.New("未连接到 PeerJS 信令服务器")
 
+// errIDTaken 表示房间号已被另一个在线实例占用。这和断线不同：只要那个实例在跑，
+// 重试永远拿不到这个 id，所以 Run 收到它就直接退出而不是按重连节奏硬刷。
+var errIDTaken = errors.New("房间号已被占用")
+
 // Options 是 RoomServer 的构造参数。
 type Options struct {
 	RoomName  string
@@ -71,8 +75,9 @@ type RoomServer struct {
 
 	wsURL string
 
-	mu sync.Mutex
-	ws *websocket.Conn // 非 nil 表示信令链路活着
+	mu      sync.Mutex
+	ws      *websocket.Conn // 非 nil 表示信令链路活着
+	idTaken bool            // 收到 ID-TAKEN 后置位，Run 据此退出而非重连
 
 	connMu  sync.RWMutex
 	conns   map[string]*roomConn // connectionId -> 连接
@@ -156,6 +161,10 @@ func (s *RoomServer) Run(ctx context.Context) error {
 		err := s.runOnce(ctx)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if s.isIDTaken() {
+			log.Printf("房间号 %q 已被另一个实例占用，停止重试（换个名字，或停掉那个实例）", s.RoomName)
+			return errIDTaken
 		}
 		if attempt > 0 {
 			log.Printf("信令连接已断开（%v），%s 后重连…", err, reconnectGap)
@@ -301,6 +310,19 @@ func (s *RoomServer) startHeartbeat(ctx context.Context) {
 	}()
 }
 
+// markIDTaken 记录收到过 ID-TAKEN。
+func (s *RoomServer) markIDTaken() {
+	s.mu.Lock()
+	s.idTaken = true
+	s.mu.Unlock()
+}
+
+func (s *RoomServer) isIDTaken() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idTaken
+}
+
 func (s *RoomServer) handleMessage(msg sigMsg) {
 	switch msg.Type {
 	case "OPEN":
@@ -313,6 +335,9 @@ func (s *RoomServer) handleMessage(msg sigMsg) {
 		log.Printf("信令服务器返回错误：%v", msg.Payload)
 
 	case "ID-TAKEN":
+		// 信令服务器随后会关掉这条连接，readLoop 随之返回，Run 靠下面的
+		// isIDTaken 区分「撞名」和「网络抖动」两种断线原因。
+		s.markIDTaken()
 		log.Printf("房间号 %q 已被占用（可能是上一个实例还没退出），换一个名字或稍后再试", s.RoomName)
 
 	case "INVALID-KEY":
