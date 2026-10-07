@@ -118,17 +118,17 @@ jobs:
           else
             tar -czf "dist/${base}.tar.gz" -C room-go "$(basename "$src")"
           fi
-          (cd dist && sha256sum "${base}".* > "SHA256SUMS.txt")
           ls -lh dist
+          # 注意：这里不要写 SHA256SUMS.txt——6 个矩阵实例各写各的，
+          # merge-multiple 合并同名文件时后者覆盖前者，最终只剩最后一行。
+          # 汇总校验和由 release job 在合并全部产物后统一生成。
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: room-server-v${{ steps.vars.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            dist/room_v*
-            dist/SHA256SUMS.txt
+          path: dist/room_v*
           if-no-files-found: ignore
 
   release:
@@ -154,9 +154,13 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          find . -maxdepth 2 -type f \( -name 'room_v*' -o -name 'SHA256SUMS.txt' \) | sort
+          find . -maxdepth 3 -type f -name 'room_v*' | sort
+          # 合并各平台产物后在这里一次性生成校验和（各矩阵实例各自生成会被覆盖）
+          (cd $(pwd) && find . -maxdepth 3 -type f -name 'room_v*' -print0 \
+            | xargs -0 -r sha256sum > SHA256SUMS.txt)
+          cat SHA256SUMS.txt
           assets=()
-          while IFS= read -r f; do assets+=("$f"); done < <(find . -maxdepth 2 -type f \( -name 'room_v*' -o -name 'SHA256SUMS.txt' \) | sort)
+          while IFS= read -r f; do assets+=("$f"); done < <(find . -maxdepth 3 -type f \( -name 'room_v*' -o -name 'SHA256SUMS.txt' \) | sort)
           gh release create "v${{ needs.build.outputs.version }}" \
             --title "room-server v${{ needs.build.outputs.version }}" \
             --generate-notes \
