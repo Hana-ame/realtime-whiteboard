@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	signalingURL = "wss://0.peerjs.com:443/peerjs?key=peerjs"
+	signalingURL = "wss://0.peerjs.com:443/peerjs?key=peerjs&version=1.5.5"
 	heartbeatInt = 5000
 )
 
