@@ -33,53 +33,72 @@ jobs:
           CF_KEY: ${{ secrets.CF_GLOBAL_KEY }}
           CF_ACCOUNT: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
-          set -e
+          python3 << 'PYEOF'
+          import os, json, urllib.request, urllib.error, mimetypes, uuid
 
-          # Build file list
-          cd dist
-          FILES=()
-          for f in $(find . -type f); do
-            FILES+=("-F" "${f#./}=@${f#./}")
-          done
+          cf_email = os.environ['CF_EMAIL']
+          cf_key = os.environ['CF_KEY']
+          cf_account = os.environ['CF_ACCOUNT']
+
+          # Walk dist directory and collect files
+          dist_dir = 'dist'
+          files = []
+          for root, dirs, fnames in os.walk(dist_dir):
+              for fname in fnames:
+                  full_path = os.path.join(root, fname)
+                  rel_path = os.path.relpath(full_path, dist_dir)
+                  files.append((rel_path, full_path))
+
+          print(f"Found {len(files)} files")
+          for rel, full in files:
+              print(f"  {rel} ({os.path.getsize(full)} bytes)")
 
           # Build manifest
-          MANIFEST="{"
-          FIRST=true
-          for f in $(find . -type f); do
-            PATH="${f#./}"
-            if [ "$FIRST" = true ]; then
-              FIRST=false
-            else
-              MANIFEST+=","
-            fi
-            MANIFEST+="\"${PATH}\":{}"
-          done
-          MANIFEST+="}"
+          manifest = {rel: {} for rel, _ in files}
+          print(f"Manifest: {json.dumps(manifest)}")
 
-          echo "Manifest: $MANIFEST"
-          echo "Files: ${#FILES[@]} args"
+          # Build multipart form data
+          boundary = uuid.uuid4().hex
+          body = b''
 
-          # Upload
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
-            -X POST \
-            -H "X-Auth-Email: $CF_EMAIL" \
-            -H "X-Auth-Key: $CF_KEY" \
-            -F "manifest=$MANIFEST" \
-            "${FILES[@]}" \
-            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/pages/projects/realtime-whiteboard/deployments")
+          # Add manifest field
+          body += f'--{boundary}\r\n'.encode()
+          body += b'Content-Type: application/json\r\n'
+          body += b'Content-Disposition: form-data; name="manifest"\r\n\r\n'
+          body += json.dumps(manifest).encode()
+          body += b'\r\n'
 
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
+          # Add files
+          for rel_path, full_path in files:
+              body += f'--{boundary}\r\n'.encode()
+              ctype = mimetypes.guess_type(full_path)[0] or 'application/octet-stream'
+              body += f'Content-Type: {ctype}\r\n'.encode()
+              body += f'Content-Disposition: form-data; name="{rel_path}"; filename="{rel_path}"\r\n\r\n'.encode()
+              with open(full_path, 'rb') as f:
+                  body += f.read()
+              body += b'\r\n'
 
-          echo "HTTP Code: $HTTP_CODE"
-          echo "Response: $BODY"
+          body += f'--{boundary}--\r\n'.encode()
 
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "Deploy failed with HTTP $HTTP_CODE"
-            exit 1
-          fi
+          print(f"Total body size: {len(body)} bytes")
 
-          # Extract deployment ID
-          DEP_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['id'])")
-          echo "Deployment ID: $DEP_ID"
-          echo "https://$DEP_ID.realtime-whiteboard-3w5.pages.dev"
+          # Make API request
+          url = f'https://api.cloudflare.com/client/v4/accounts/{cf_account}/pages/projects/realtime-whiteboard/deployments'
+          req = urllib.request.Request(url, data=body, method='POST')
+          req.add_header('X-Auth-Email', cf_email)
+          req.add_header('X-Auth-Key', cf_key)
+          req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
+
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  result = json.loads(resp.read().decode())
+                  print(f"HTTP {resp.status}")
+                  print(f"Response: {json.dumps(result, indent=2)}")
+                  dep_id = result['result']['id']
+                  print(f"Deployment ID: {dep_id}")
+                  print(f"URL: https://{dep_id}.realtime-whiteboard-3w5.pages.dev")
+          except urllib.error.HTTPError as e:
+              print(f"HTTP Error: {e.code}")
+              print(f"Response: {e.read().decode()}")
+              exit(1)
+          PYEOF
