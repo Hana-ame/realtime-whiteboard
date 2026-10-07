@@ -57,12 +57,16 @@ export function initToolbar() {
     document.getElementById('pen-size-val').textContent = state.penSize;
   });
 
-  // Note font size
-  document.getElementById('note-font-size').addEventListener('input', e => {
-    state.noteFontSize = +e.target.value;
-    document.getElementById('note-font-size-val').textContent = state.noteFontSize;
+  // Note font size (per-note, synced with selection)
+  const fsSlider = document.getElementById('note-font-size');
+  const fsVal = document.getElementById('note-font-size-val');
+  fsSlider.addEventListener('input', e => {
+    const size = +e.target.value;
+    state.noteFontSize = size;
+    fsVal.textContent = size;
     if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
       pushUndo();
+      state.elements[state.selectedId].fontSize = size;
       upsert(state.elements[state.selectedId]);
     }
     requestRender();
@@ -139,6 +143,14 @@ export function selectTool(t) {
 export function updateDeleteBtn() {
   const btn = document.getElementById('delete-btn');
   if (btn) btn.style.display = state.selectedId ? '' : 'none';
+  // Sync font size slider with selected note
+  const el = state.selectedId ? state.elements[state.selectedId] : null;
+  if (el && el.type === 'note') {
+    const fs = el.fontSize || 16;
+    state.noteFontSize = fs;
+    document.getElementById('note-font-size').value = fs;
+    document.getElementById('note-font-size-val').textContent = fs;
+  }
   // Show ctx-bar if selection exists or tool-specific settings are active
   const bar = document.getElementById('ctx-bar');
   if (bar) {

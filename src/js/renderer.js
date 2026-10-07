@@ -190,7 +190,7 @@ function drawNote(n) {
   
   ctx.save();
   ctx.fillStyle = '#1c1f2b';
-  const fs = state.noteFontSize;
+  const fs = n.fontSize || 16;
   ctx.font = `${fs}px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif`;
   ctx.textBaseline = 'top';
   const pad = 10;

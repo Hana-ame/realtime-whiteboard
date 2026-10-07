@@ -194,7 +194,7 @@ export function initInteraction() {
           id: uid(), type: 'note',
           x: wp.x - NOTE_W / 2, y: wp.y - NOTE_H / 2,
           w: NOTE_W, h: NOTE_H,
-          text: '', color: state.noteColor, rev: 0
+          text: '', color: state.noteColor, fontSize: state.noteFontSize, rev: 0
         };
         upsert(n);
         state.selectedId = n.id;
