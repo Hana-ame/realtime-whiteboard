@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	signalingURL = "wss://0.peerjs.com:443/peerjs?key=peerjs&version=1.5.5"
 	heartbeatInt = 5000
 )
 
@@ -27,23 +26,14 @@ func main() {
 	fmt.Printf("[room] Creating room: %s\n", roomName)
 
 	// Connect to PeerJS signaling server
-	conn, _, err := websocket.DefaultDialer.Dial(signalingURL, nil)
+	// The WebSocket URL must include the peer ID and token
+	wsURL := fmt.Sprintf("wss://0.peerjs.com:443/peerjs?key=peerjs&id=%s&token=&version=1.5.5", roomName)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		log.Fatalf("WebSocket connect failed: %v", err)
 	}
 	defer conn.Close()
 	fmt.Println("[room] Connected to signaling server")
-
-	// Register peer
-	regMsg := map[string]interface{}{
-		"type": "REGISTER",
-		"payload": map[string]interface{}{
-			"id": roomName,
-		},
-	}
-	jsonMsg, _ := json.Marshal(regMsg)
-	conn.WriteMessage(websocket.TextMessage, jsonMsg)
-	fmt.Println("[room] Sent registration")
 
 	// Initialize WebRTC
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
