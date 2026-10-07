@@ -29,9 +29,7 @@ jobs:
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v4
-        env:
-          CLOUDFLARE_API_KEY: ${{ secrets.CF_GLOBAL_KEY }}
-          CLOUDFLARE_API_EMAIL: ${{ secrets.CF_GLOBAL_EMAIL }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
           command: pages deploy dist --project-name=realtime-whiteboard
