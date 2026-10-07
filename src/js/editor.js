@@ -42,6 +42,9 @@ export function positionEditor(n) {
   editor.style.lineHeight = '1.32';
   editor.style.borderRadius = (12 * s) + 'px';
   editor.style.background = n.color;
+  // 便签带旋转时，编辑框跟着转（与 canvas 绘制同绕中心旋转，Word 式）
+  editor.style.transformOrigin = 'center center';
+  editor.style.transform = n.rotation ? `rotate(${n.rotation}rad)` : '';
 }
 
 export function openEditor(n) {

@@ -13,8 +13,30 @@ import { selectTool, updateZoomLabel, updateDeleteBtn } from './toolbar.js';
 export const NOTE_W = 170;
 export const NOTE_H = 120;
 
-// Geometry helpers
+// ── Rotation helpers ───────────────────────────────────────────────────────
+// Offset (screen px, unscaled) for the rotation handle above the top edge.
+export const ROTATE_OFFSET = 28;
+
+// Element centre in world coordinates.
+export function elCenter(n) {
+  return { x: n.x + n.w / 2, y: n.y + n.h / 2 };
+}
+
+// Rotate a world point around (cx, cy) by angle (radians).
+export function rotatePointAround(px, py, cx, cy, angle) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const dx = px - cx, dy = py - cy;
+  return { x: cx + dx * c - dy * s, y: cy + dx * s + dy * c };
+}
+
+// ── Geometry helpers ───────────────────────────────────────────────────────
 export function hitNote(n, p) {
+  if (n.rotation) {
+    const c = elCenter(n);
+    const local = rotatePointAround(p.x, p.y, c.x, c.y, -n.rotation);
+    return local.x >= n.x && local.x <= n.x + n.w &&
+           local.y >= n.y && local.y <= n.y + n.h;
+  }
   return p.x >= n.x && p.x <= n.x + n.w && p.y >= n.y && p.y <= n.y + n.h;
 }
 
@@ -86,19 +108,35 @@ export function pick(p) {
 }
 
 export function noteHandles(n) {
-  const tl = worldToScreen(n.x, n.y, state.view);
+  const c = elCenter(n);
+  const sc = state.view.scale;
   const sz = 8;
-  const pts = {
-    nw: { x: tl.x, y: tl.y },
-    ne: { x: tl.x + n.w * state.view.scale, y: tl.y },
-    sw: { x: tl.x, y: tl.y + n.h * state.view.scale },
-    se: { x: tl.x + n.w * state.view.scale, y: tl.y + n.h * state.view.scale },
-    n: { x: tl.x + n.w * state.view.scale / 2, y: tl.y },
-    s: { x: tl.x + n.w * state.view.scale / 2, y: tl.y + n.h * state.view.scale },
-    w: { x: tl.x, y: tl.y + n.h * state.view.scale / 2 },
-    e: { x: tl.x + n.w * state.view.scale, y: tl.y + n.h * state.view.scale / 2 }
+
+  // 8 resize handles: positions relative to centre, rotated, then to screen.
+  const localRel = {
+    nw: { x: -n.w / 2, y: -n.h / 2 },
+    ne: { x:  n.w / 2, y: -n.h / 2 },
+    sw: { x: -n.w / 2, y:  n.h / 2 },
+    se: { x:  n.w / 2, y:  n.h / 2 },
+    n:  { x:  0,        y: -n.h / 2 },
+    s:  { x:  0,        y:  n.h / 2 },
+    w:  { x: -n.w / 2, y:  0 },
+    e:  { x:  n.w / 2, y:  0 }
   };
-  return { pts, sz };
+  const pts = {};
+  for (const k in localRel) {
+    const w = rotatePointAround(c.x + localRel[k].x, c.y + localRel[k].y, c.x, c.y, n.rotation || 0);
+    pts[k] = worldToScreen(w.x, w.y, state.view);
+  }
+
+  // Rotation handle: fixed screen-offset above top-centre, rotated with element.
+  const rotOffsetWorld = ROTATE_OFFSET / sc;
+  const rotLocalRel = { x: 0, y: -n.h / 2 - rotOffsetWorld };
+  const rotWorld = rotatePointAround(c.x + rotLocalRel.x, c.y + rotLocalRel.y, c.x, c.y, n.rotation || 0);
+  const rotScreen = worldToScreen(rotWorld.x, rotWorld.y, state.view);
+  const rotCx = worldToScreen(c.x, c.y, state.view);
+
+  return { pts, sz, rotScreen, rotCx };
 }
 
 export function hitHandle(n, p) {
@@ -109,13 +147,35 @@ export function hitHandle(n, p) {
   return null;
 }
 
+// Hit-test the rotation handle (screen-space p). Returns true if inside.
+export function hitRotateHandle(n, p) {
+  const { rotScreen, sz } = noteHandles(n);
+  return Math.abs(p.x - rotScreen.x) <= sz && Math.abs(p.y - rotScreen.y) <= sz;
+}
+
 export function contentBounds() {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, has = false;
   for (const id in state.elements) {
     const el = state.elements[id];
     let x0, y0, x1, y1;
     if (el.type === 'note' || el.type === 'image') {
-      x0 = el.x; y0 = el.y; x1 = el.x + el.w; y1 = el.y + el.h;
+      if (el.rotation) {
+        const c = elCenter(el);
+        const corners = [
+          rotatePointAround(el.x, el.y, c.x, c.y, el.rotation),
+          rotatePointAround(el.x + el.w, el.y, c.x, c.y, el.rotation),
+          rotatePointAround(el.x, el.y + el.h, c.x, c.y, el.rotation),
+          rotatePointAround(el.x + el.w, el.y + el.h, c.x, c.y, el.rotation)
+        ];
+        for (const corner of corners) {
+          x0 = Math.min(x0 ?? corner.x, corner.x);
+          y0 = Math.min(y0 ?? corner.y, corner.y);
+          x1 = Math.max(x1 ?? corner.x, corner.x);
+          y1 = Math.max(y1 ?? corner.y, corner.y);
+        }
+      } else {
+        x0 = el.x; y0 = el.y; x1 = el.x + el.w; y1 = el.y + el.h;
+      }
     } else if (el.type === 'stroke') {
       if (!el.points || el.points.length === 0) continue;
       for (const pt of el.points) {
@@ -199,6 +259,7 @@ export function insertImageFile(file) {
         w: dw,
         h: dh,
         dataUrl,
+        rotation: 0,
         rev: 0
       };
       upsert(imageEl, true);
@@ -232,6 +293,27 @@ export function initInteraction() {
     }
     if (e.button === 2) return;
 
+    // Rotation handle check (Word-style: outside the box, above top-centre).
+    // Checked before the resize handles so the two regions never fight.
+    if (state.selectedId && state.elements[state.selectedId]) {
+      const sel = state.elements[state.selectedId];
+      if ((sel.type === 'note' || sel.type === 'image') && hitRotateHandle(sel, sp)) {
+        const c = elCenter(sel);
+        pushUndo();
+        state.drag = {
+          mode: 'rotate',
+          id: sel.id,
+          center: c,
+          startAngle: Math.atan2(wp.y - c.y, wp.x - c.x),
+          origRotation: sel.rotation || 0,
+          moved: false,
+          pointerId: e.pointerId
+        };
+        requestRender();
+        return;
+      }
+    }
+
     // Resize handle check (before tool-specific handlers so it works in any tool)
     if (state.selectedId && state.elements[state.selectedId]) {
       const sel = state.elements[state.selectedId];
@@ -247,6 +329,7 @@ export function initInteraction() {
             origY: sel.y,
             origW: sel.w,
             origH: sel.h,
+            rotation: sel.rotation || 0,
             startWp: { x: wp.x, y: wp.y },
             pointerId: e.pointerId
           };
@@ -286,7 +369,8 @@ export function initInteraction() {
           id: uid(), type: 'note',
           x: wp.x - NOTE_W / 2, y: wp.y - NOTE_H / 2,
           w: NOTE_W, h: NOTE_H,
-          text: '', color: state.noteColor, fontSize: state.noteFontSize, rev: 0
+          text: '', color: state.noteColor, fontSize: state.noteFontSize,
+          rotation: 0, rev: 0
         };
         upsert(n);
         state.selectedId = n.id;
@@ -391,40 +475,67 @@ export function initInteraction() {
       return;
     }
     
+    if (state.drag.mode === 'rotate') {
+      const n = state.elements[state.drag.id];
+      if (!n) return;
+      const { center, startAngle, origRotation } = state.drag;
+      const ang = Math.atan2(wp.y - center.y, wp.x - center.x);
+      let rot = origRotation + (ang - startAngle);
+      if (e.shiftKey) {
+        // Snap to 15° steps while Shift is held
+        const step = Math.PI / 12;
+        rot = Math.round(rot / step) * step;
+      }
+      n.rotation = rot;
+      state.drag.moved = true;
+      state.drag.angle = rot;
+      state.elements[n.id] = n;
+      broadcastThrottled(n);
+      requestRender();
+      return;
+    }
+
     if (state.drag.mode === 'resize') {
       const n = state.elements[state.drag.id];
       if (!n) return;
-      const { hk, origX, origY, origW, origH, startWp } = state.drag;
-      const dx = wp.x - startWp.x;
-      const dy = wp.y - startWp.y;
+      const { hk, origX, origY, origW, origH, rotation } = state.drag;
+      const sx = hk.includes('e') ? 1 : (hk.includes('w') ? -1 : 0);
+      const sy = hk.includes('s') ? 1 : (hk.includes('n') ? -1 : 0);
+      const c0 = { x: origX + origW / 2, y: origY + origH / 2 };
 
-      let nx = origX, ny = origY, nw = origW, nh = origH;
+      // Pointer in the element's unrotated frame.
+      const q = rotatePointAround(wp.x, wp.y, c0.x, c0.y, -rotation);
+      // Anchor: the corner/edge opposite the dragged handle, which must stay
+      // fixed in rendered space even when the element is rotated.
+      const ax = sx === 1 ? origX : (sx === -1 ? origX + origW : c0.x);
+      const ay = sy === 1 ? origY : (sy === -1 ? origY + origH : c0.y);
 
-      if (hk.includes('e')) {
-        nw = Math.max(40, origW + dx);
-      } else if (hk.includes('w')) {
-        const potentialW = origW - dx;
-        if (potentialW >= 40) {
-          nx = origX + dx;
-          nw = potentialW;
-        } else {
-          nx = origX + origW - 40;
-          nw = 40;
-        }
+      const nw_min = 40;
+
+      let nw, nh;
+      if (sx !== 0 && sy !== 0) {
+        // Corner handle → proportional (aspect-ratio-locked). Project the
+        // pointer onto the box diagonal in the element's local frame so the
+        // dragged corner tracks the cursor while w:h stays origW:origH.
+        const dx = sx * origW, dy = sy * origH;
+        const vx = q.x - ax, vy = q.y - ay;
+        let t = (vx * dx + vy * dy) / (dx * dx + dy * dy);
+        const minT = Math.max(nw_min / origW, nw_min / origH);
+        t = Math.max(minT, t);
+        nw = origW * t;
+        nh = origH * t;
+      } else {
+        // Edge handle → non-proportional, only the matching dimension changes.
+        nw = sx !== 0 ? Math.max(nw_min, sx * (q.x - ax)) : origW;
+        nh = sy !== 0 ? Math.max(nw_min, sy * (q.y - ay)) : origH;
       }
 
-      if (hk.includes('s')) {
-        nh = Math.max(40, origH + dy);
-      } else if (hk.includes('n')) {
-        const potentialH = origH - dy;
-        if (potentialH >= 40) {
-          ny = origY + dy;
-          nh = potentialH;
-        } else {
-          ny = origY + origH - 40;
-          nh = 40;
-        }
-      }
+      // New centre so the (rotated) anchor stays put.
+      const aw = rotatePointAround(ax, ay, c0.x, c0.y, rotation);
+      const ox = -sx * nw / 2, oy = -sy * nh / 2;
+      const roff = rotatePointAround(ox, oy, 0, 0, rotation);
+      const nx = aw.x - roff.x - nw / 2;
+      const ny = aw.y - roff.y - nh / 2;
 
       n.x = Math.round(nx);
       n.y = Math.round(ny);
@@ -466,7 +577,7 @@ export function initInteraction() {
     if (mode === 'draw') {
       const s = state.elements[dragId];
       if (s) upsert(s);
-    } else if (mode === 'move' || mode === 'move-el' || mode === 'resize') {
+    } else if (mode === 'move' || mode === 'move-el' || mode === 'resize' || mode === 'rotate') {
       const el = state.elements[dragId];
       if (el && moved) {
         upsert(el);
@@ -590,6 +701,30 @@ export function initInteraction() {
       }
       return;
     }
+    // Rotate selected note/image: Shift+R = +15°, Shift+0 = reset.
+    if (e.shiftKey && state.selectedId && state.elements[state.selectedId]) {
+      const el = state.elements[state.selectedId];
+      if (el.type === 'note' || el.type === 'image') {
+        const step = Math.PI / 12;
+        if (e.code === 'KeyR') {
+          e.preventDefault();
+          pushUndo();
+          el.rotation = Math.round(((el.rotation || 0) + step) / step) * step;
+          upsert(el);
+          toast('旋转 ' + Math.round(el.rotation * 180 / Math.PI) + '°');
+          return;
+        }
+        if (e.code === 'Digit0') {
+          e.preventDefault();
+          pushUndo();
+          el.rotation = 0;
+          upsert(el);
+          toast('旋转已复位');
+          return;
+        }
+      }
+    }
+
     const map = { v: 'select', n: 'note', p: 'pen', l: 'connect', h: 'pan' };
     const k = e.key.toLowerCase();
     if (map[k] && !e.ctrlKey && !e.metaKey) {
