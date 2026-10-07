@@ -27,9 +27,59 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=realtime-whiteboard
+      - name: Deploy to Cloudflare Pages via API
+        env:
+          CF_EMAIL: ${{ secrets.CF_GLOBAL_EMAIL }}
+          CF_KEY: ${{ secrets.CF_GLOBAL_KEY }}
+          CF_ACCOUNT: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -e
+
+          # Build file list
+          cd dist
+          FILES=()
+          for f in $(find . -type f); do
+            FILES+=("-F" "${f#./}=@${f#./}")
+          done
+
+          # Build manifest
+          MANIFEST="{"
+          FIRST=true
+          for f in $(find . -type f); do
+            PATH="${f#./}"
+            if [ "$FIRST" = true ]; then
+              FIRST=false
+            else
+              MANIFEST+=","
+            fi
+            MANIFEST+="\"${PATH}\":{}"
+          done
+          MANIFEST+="}"
+
+          echo "Manifest: $MANIFEST"
+          echo "Files: ${#FILES[@]} args"
+
+          # Upload
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "X-Auth-Email: $CF_EMAIL" \
+            -H "X-Auth-Key: $CF_KEY" \
+            -F "manifest=$MANIFEST" \
+            "${FILES[@]}" \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/pages/projects/realtime-whiteboard/deployments")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "HTTP Code: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Deploy failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          # Extract deployment ID
+          DEP_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['id'])")
+          echo "Deployment ID: $DEP_ID"
+          echo "https://$DEP_ID.realtime-whiteboard-3w5.pages.dev"
