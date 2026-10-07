@@ -302,8 +302,17 @@ function getStrokeBBox(el) {
 function isCulled(el, vr) {
   if (!el) return true;
   if (el.type === 'note' || el.type === 'image') {
-    return el.x + el.w < vr.x0 || el.x > vr.x1 ||
-           el.y + el.h < vr.y0 || el.y > vr.y1;
+    let x0, y0, x1, y1;
+    if (el.rotation) {
+      const cx = el.x + el.w / 2, cy = el.y + el.h / 2;
+      const c = Math.abs(Math.cos(el.rotation)), s = Math.abs(Math.sin(el.rotation));
+      const hw = (el.w * c + el.h * s) / 2;
+      const hh = (el.w * s + el.h * c) / 2;
+      x0 = cx - hw; y0 = cy - hh; x1 = cx + hw; y1 = cy + hh;
+    } else {
+      x0 = el.x; y0 = el.y; x1 = el.x + el.w; y1 = el.y + el.h;
+    }
+    return x1 < vr.x0 || x0 > vr.x1 || y1 < vr.y0 || y0 > vr.y1;
   }
   if (el.type === 'stroke') {
     const bb = getStrokeBBox(el);
@@ -463,6 +472,16 @@ function drawGrid() {
   ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
 }
 
+// Apply an element's rotation about its centre to the current ctx. Callers
+// must wrap this in ctx.save()/ctx.restore().
+function applyElRotation(el) {
+  if (!el.rotation) return;
+  const cx = el.x + el.w / 2, cy = el.y + el.h / 2;
+  ctx.translate(cx, cy);
+  ctx.rotate(el.rotation);
+  ctx.translate(-cx, -cy);
+}
+
 function roundRect(c, x, y, w, h, r) {
   if (c.roundRect) {
     c.beginPath(); c.roundRect(x, y, w, h, r); return;
@@ -530,6 +549,9 @@ function drawImagePlaceholder(el, img) {
 }
 
 function drawImageEl(el) {
+  ctx.save();
+  applyElRotation(el);
+
   let drawSource;
 
   // GIF with decoded frames: draw current animation frame
@@ -541,6 +563,7 @@ function drawImageEl(el) {
     drawSource = getImageObj(el);
     if (!drawSource.complete || !drawSource.naturalWidth) {
       drawImagePlaceholder(el, drawSource);
+      ctx.restore();
       return;
     }
   }
@@ -561,9 +584,13 @@ function drawImageEl(el) {
   roundRect(ctx, el.x, el.y, el.w, el.h, 6);
   ctx.stroke();
   ctx.restore();
+
+  ctx.restore();
 }
 
 function drawNote(n) {
+  ctx.save();
+  applyElRotation(n);
   ctx.save();
   ctx.globalAlpha = (n.bgOpacity ?? 88) / 100;
   ctx.shadowColor = 'rgba(20,24,40,.16)';
@@ -588,6 +615,7 @@ function drawNote(n) {
     ctx.fillText(ln, n.x + pad, yy);
     yy += fs * 1.32;
   }
+  ctx.restore();
   ctx.restore();
 }
 
@@ -650,21 +678,58 @@ function drawConnection(c) {
 }
 
 function drawSelection(n) {
-  const tl = worldToScreen(n.x, n.y, state.view);
-  const w = n.w * state.view.scale;
-  const h = n.h * state.view.scale;
+  const { pts, sz, rotScreen, rotCx } = noteHandles(n);
   ctx.strokeStyle = '#4c8bf5';
   ctx.lineWidth = 1.5;
   ctx.setLineDash([]);
-  ctx.strokeRect(tl.x - 1, tl.y - 1, w + 2, h + 2);
-  
-  const { pts } = noteHandles(n);
+
+  // Rotated selection frame (follows the element's angle).
+  ctx.beginPath();
+  ctx.moveTo(pts.nw.x, pts.nw.y);
+  ctx.lineTo(pts.ne.x, pts.ne.y);
+  ctx.lineTo(pts.se.x, pts.se.y);
+  ctx.lineTo(pts.sw.x, pts.sw.y);
+  ctx.closePath();
+  ctx.stroke();
+
+  // Rotation handle: line from the knob to the element centre + the knob.
+  ctx.save();
+  ctx.strokeStyle = 'rgba(76,139,245,.55)';
+  ctx.beginPath();
+  ctx.moveTo(rotCx.x, rotCx.y);
+  ctx.lineTo(rotScreen.x, rotScreen.y);
+  ctx.stroke();
+  ctx.restore();
+
+  // 8 resize handles (4 corners = proportional, 4 edge midpoints = free).
+  const half = sz / 2;
   ctx.fillStyle = '#fff';
   for (const k in pts) {
     ctx.beginPath();
-    ctx.rect(pts[k].x - 4, pts[k].y - 4, 8, 8);
+    ctx.rect(pts[k].x - half, pts[k].y - half, sz, sz);
     ctx.fill();
     ctx.stroke();
+  }
+
+  // Rotation knob (round, outside the frame).
+  ctx.beginPath();
+  ctx.arc(rotScreen.x, rotScreen.y, half + 1, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Live angle readout while dragging the rotation handle.
+  const drag = state.drag;
+  if (drag && drag.mode === 'rotate' && drag.id === n.id && drag.angle != null) {
+    const label = Math.round(drag.angle * 180 / Math.PI) + '°';
+    ctx.save();
+    ctx.font = '12px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(31,35,48,.92)';
+    ctx.fillRect(rotScreen.x + 10, rotScreen.y - 24, tw + 14, 20);
+    ctx.fillStyle = '#fff';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, rotScreen.x + 17, rotScreen.y - 13);
+    ctx.restore();
   }
 }
 
@@ -740,14 +805,27 @@ function drawMinimap() {
   
   mm._map = { b, sc, ox, oy };
   
+  // Draw a rect for note/image, honouring rotation about the element centre.
+  const mmRect = (el, fill) => {
+    mmx.fillStyle = fill;
+    if (el.rotation) {
+      const cx = tx(el.x + el.w / 2), cy = ty(el.y + el.h / 2);
+      mmx.save();
+      mmx.translate(cx, cy);
+      mmx.rotate(el.rotation);
+      mmx.fillRect(-el.w * sc / 2, -el.h * sc / 2, el.w * sc, el.h * sc);
+      mmx.restore();
+    } else {
+      mmx.fillRect(tx(el.x), ty(el.y), el.w * sc, el.h * sc);
+    }
+  };
+
   for (const id in state.elements) {
     const el = state.elements[id];
     if (el.type === 'note') {
-      mmx.fillStyle = el.color;
-      mmx.fillRect(tx(el.x), ty(el.y), el.w * sc, el.h * sc);
+      mmRect(el, el.color);
     } else if (el.type === 'image') {
-      mmx.fillStyle = '#c8cdd8';
-      mmx.fillRect(tx(el.x), ty(el.y), el.w * sc, el.h * sc);
+      mmRect(el, '#c8cdd8');
     } else if (el.type === 'stroke') {
       mmx.strokeStyle = el.color;
       mmx.lineWidth = 1;

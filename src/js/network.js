@@ -538,7 +538,7 @@ function handleMsg(m, conn) {
       if (el._isLiveMove && cur) {
         // 直播拖拽只更新几何字段，保留非几何字段（文字/颜色/dataUrl）
         if ((cur.rev || 0) > (el.rev || 0)) el.rev = cur.rev;
-        Object.assign(cur, { x: el.x, y: el.y, w: el.w, h: el.h, points: el.points });
+        Object.assign(cur, { x: el.x, y: el.y, w: el.w, h: el.h, rotation: el.rotation, points: el.points });
       } else {
         // 新增元素或网络 upsert 覆盖：可能改变排序结果（包括对方 bringToFront
         // 随 upsert 带过来的 z 变化），sortedIds / contentBounds 缓存必须失效。
@@ -559,7 +559,7 @@ function handleMsg(m, conn) {
       // Preserve local drag position during fullSync to avoid position jumps
       const dragId = state.drag && state.drag.id;
       const dragPos = dragId && state.elements[dragId]
-        ? { x: state.elements[dragId].x, y: state.elements[dragId].y } : null;
+        ? { x: state.elements[dragId].x, y: state.elements[dragId].y, rotation: state.elements[dragId].rotation } : null;
       // Merge per-element with rev comparison; preserve newer local data
       const incoming = m.elements || {};
       // Clear caches for images being replaced
@@ -587,6 +587,7 @@ function handleMsg(m, conn) {
       if (dragId && dragPos && state.elements[dragId]) {
         state.elements[dragId].x = dragPos.x;
         state.elements[dragId].y = dragPos.y;
+        if (dragPos.rotation !== undefined) state.elements[dragId].rotation = dragPos.rotation;
       }
     } else {
       for (const id in m.elements) {
