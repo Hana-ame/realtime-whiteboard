@@ -118,8 +118,19 @@ function installBrowserShims() {
     scrollX: 0,
     scrollY: 0,
     location: { hash: '', href: 'http://localhost:5173/', search: '', pathname: '/' },
-    addEventListener() {},
-    removeEventListener() {},
+    // Record handlers (like makeEl) so tests can fire e.g. the hashchange
+    // listener network.js registers — needed to exercise room switching.
+    _listeners: new Map(),
+    addEventListener(type, fn) {
+      if (!this._listeners.has(type)) this._listeners.set(type, []);
+      this._listeners.get(type).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const list = this._listeners.get(type);
+      if (!list) return;
+      const i = list.indexOf(fn);
+      if (i >= 0) list.splice(i, 1);
+    },
     scrollTo() {},
     scroll() {},
     focus() {},
