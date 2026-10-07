@@ -16,17 +16,57 @@ let renderQueued = false;
 // Image element cache: id -> HTMLImageElement
 const imageCache = {};
 
+// ── Lazy image src assignment ──────────────────────────────────────────────
+// Setting `img.src` to a multi-MB base64 dataUrl forces the browser to parse
+// the whole string synchronously; doing N of them in one render pass blocks the
+// main thread (the "first screen frozen while images show placeholders"
+// symptom). Instead we queue the assignment and pump the queue in small time
+// slices (≤4ms per tick) so the UI stays responsive while placeholders spin.
+const imageQueue = [];
+let imagePumpTimer = null;
+
+function pumpImageQueue() {
+  const start = performance.now();
+  while (imageQueue.length && performance.now() - start < 4) {
+    const img = imageQueue.shift();
+    img.src = img._dataUrl;
+  }
+  if (imageQueue.length) imagePumpTimer = setTimeout(pumpImageQueue, 0);
+  else imagePumpTimer = null;
+}
+
+function queueImageSrc(img) {
+  imageQueue.push(img);
+  if (!imagePumpTimer) imagePumpTimer = setTimeout(pumpImageQueue, 0);
+}
+
+function unqueueImage(id) {
+  for (let i = imageQueue.length - 1; i >= 0; i--) {
+    if (imageQueue[i]._elId === id) imageQueue.splice(i, 1);
+  }
+}
+
 // Images currently loading — used to drive the placeholder spinner animation.
-// A non-empty set means requestRender() must fire every animation frame so
-// the spinner arc rotates. Cleared on img.onload / img.onerror.
+// A non-empty set means requestRender() must fire periodically so the spinner
+// arc rotates. Cleared on img.onload / img.onerror.
+//
+// The loop is throttled to SPINNER_FRAME_MS (~15fps): a 1 rotation/second arc
+// looks identical at 15fps, but re-rendering the WHOLE scene at 60fps while N
+// images load is the main first-screen blocker (each render re-sorts all ids,
+// rebuilds the grid pattern and re-computes minimap bounds).
 let imageLoadRafId = null;
+let lastSpinnerFrame = 0;
+const SPINNER_FRAME_MS = 66;
 const loadingImages = new Set();
 
 function startImageLoadAnim() {
   if (imageLoadRafId) return;
-  function tick() {
+  function tick(now) {
     if (loadingImages.size === 0) { imageLoadRafId = null; return; }
-    requestRender();
+    if (now - lastSpinnerFrame >= SPINNER_FRAME_MS) {
+      lastSpinnerFrame = now;
+      requestRender();
+    }
     imageLoadRafId = requestAnimationFrame(tick);
   }
   imageLoadRafId = requestAnimationFrame(tick);
@@ -39,6 +79,8 @@ function stopImageLoadAnim() {
 // Cached grid tile (offscreen canvas + bucket key from view scale)
 let gridTile = null;
 let gridTileBucket = -1;
+// Pattern built from the tile — cached so we don't createPattern every frame.
+let gridPattern = null;
 
 // Cached stroke bounding boxes: id -> { bbox, points, len }
 const strokeBboxCache = new Map();
@@ -160,7 +202,7 @@ function getImageObj(el) {
 
   const img = new Image();
   img._dataUrl = el.dataUrl;
-  img.src = el.dataUrl;
+  img._elId = el.id;
   img.onload = () => {
     loadingImages.delete(el.id);
     requestRender();
@@ -175,6 +217,7 @@ function getImageObj(el) {
   imageCache[el.id] = img;
   loadingImages.add(el.id);
   startImageLoadAnim();
+  queueImageSrc(img); // was: img.src = el.dataUrl;  — see lazy-loading note above
   return img;
 }
 
@@ -185,6 +228,7 @@ function getImageObj(el) {
 export function clearImageCache(id) {
   delete imageCache[id];
   loadingImages.delete(id);
+  unqueueImage(id);
   if (gifState[id]) {
     delete gifState[id];
     if (!hasAnyGif()) stopGifAnim();
@@ -266,14 +310,25 @@ function isCulled(el, vr) {
 // Ids sorted by (el.z || 0) ascending, preserving insertion order for equal z.
 // Uses a [id, originalIndex, z] tuple so the result is well-defined regardless
 // of the host engine's sort stability.
+//
+// Cached on state.__mut: the order only changes when elements are added,
+// removed or re-z'd, so re-sorting on every frame while images load (spinner
+// loop) is pure waste. __mut is bumped by every mutation in state.js/network.js.
+let sortedIdsCache = null;
+let sortedIdsMut = -1;
 function getSortedIds() {
+  const mut = state.__mut || 0;
+  if (sortedIdsCache && sortedIdsMut === mut) return sortedIdsCache;
   const ids = Object.keys(state.elements);
   const pairs = ids.map((id, i) => [id, i, state.elements[id].z || 0]);
   pairs.sort((a, b) => {
     if (a[2] !== b[2]) return a[2] - b[2];
     return a[1] - b[1];
   });
-  return pairs.map(p => p[0]);
+  const result = pairs.map(p => p[0]);
+  sortedIdsCache = result;
+  sortedIdsMut = mut;
+  return result;
 }
 
 function render() {
@@ -387,12 +442,14 @@ function getGridTile() {
 
   gridTile = c;
   gridTileBucket = bucket;
+  gridPattern = null; // tile replaced → pattern must be rebuilt
   return c;
 }
 
 function drawGrid() {
   const tile = getGridTile();
-  ctx.fillStyle = ctx.createPattern(tile, 'repeat');
+  if (!gridPattern) gridPattern = ctx.createPattern(tile, 'repeat');
+  ctx.fillStyle = gridPattern;
   const x0 = -state.view.x / state.view.scale;
   const y0 = -state.view.y / state.view.scale;
   const x1 = (state.W - state.view.x) / state.view.scale;
@@ -635,20 +692,18 @@ function drawPeerCursors() {
   }
 }
 
-// Cheap fingerprint cache for contentBounds().  The key is the sorted list
-// of element ids plus the sum of all el.rev values.  This is O(n) to compute
-// but avoids the O(n) contentBounds() call when nothing has structurally
-// changed.  Note: positions can change without bumping rev (live drags), so
-// the minimap may lag slightly during a drag and correct itself at pointerup.
+// Cheap fingerprint cache for contentBounds().  The key is the mutation counter
+// state.__mut: contentBounds() only changes when elements are added/removed
+// (structural) or their geometry/text is committed (upsert/undo/redo), all of
+// which bump __mut. Live drags mutate positions in place without bumping __mut,
+// so the minimap may lag slightly during a drag and correct itself at
+// pointerup — the same behavior as the old rev-sum fingerprint, but O(1) to
+// check instead of O(n log n) string building every frame.
 function getCachedContentBounds() {
-  const keys = Object.keys(state.elements);
-  keys.sort();
-  let revSum = 0;
-  for (const id of keys) revSum += state.elements[id].rev || 0;
-  const key = keys.join(',') + ':' + revSum;
-  if (boundsCache && boundsCache.key === key) return boundsCache.result;
+  const mut = state.__mut || 0;
+  if (boundsCache && boundsCache.mut === mut) return boundsCache.result;
   const result = contentBounds();
-  boundsCache = { key, result };
+  boundsCache = { mut, result };
   return result;
 }
 
