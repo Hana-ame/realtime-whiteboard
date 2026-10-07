@@ -38,6 +38,18 @@ export const peerName = '用户' + peerId.slice(0,3).toUpperCase();
 export const peerColor = hslColor(peerId);
 export const peers = {};
 
+// 内容缓存挂在具体房间下。旧代码固定写 'wb-elements-v1'，是全部房间共用的一个锅，
+// 换房间会把上一个房间的画布当成新房间的内容显示出来。
+export let persistKey = 'wb-elements-v2:default';
+export function setPersistKey(k) { persistKey = k; }
+export function getRoomKey() {
+  return persistKey.replace(/^wb-elements-v2:/, '');
+}
+
+// 自己的 PeerJS id。peers 表按它做键，头像渲染要据此过滤掉自己。
+export let selfPeerId = null;
+export function setSelfPeerId(id) { selfPeerId = id; }
+
 let _broadcastFn = null;
 let _requestRenderFn = null;
 let _clearImageCacheFn = null;
@@ -55,7 +67,7 @@ export function setDeps(broadcastFn, requestRenderFn, clearImageCacheFn, updateD
  */
 export function persist() {
   try {
-    localStorage.setItem('wb-elements-v1', JSON.stringify(state.elements));
+    localStorage.setItem(persistKey, JSON.stringify(state.elements));
   } catch(e) {}
 }
 

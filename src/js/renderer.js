@@ -3,7 +3,7 @@
  * @module renderer
  */
 
-import { state, peers, peerId } from './state.js';
+import { state, peers, peerId, selfPeerId } from './state.js';
 import { screenToWorld, worldToScreen } from './utils.js';
 import { connEndpoints, noteHandles, contentBounds } from './interaction.js';
 
@@ -289,7 +289,8 @@ function drawSelection(n) {
 function drawPeerCursors() {
   const now = performance.now();
   for (const id in peers) {
-    if (id === peerId) continue;
+    // peers 的键是 PeerJS id，自己要用 selfPeerId 过滤（peerId 是本地随机的，留着兼容旧条目）
+    if (id === peerId || id === selfPeerId) continue;
     const p = peers[id];
     if (!p.cursor || now - p.last > 12000) continue;
     const s = worldToScreen(p.cursor.x, p.cursor.y, state.view);
