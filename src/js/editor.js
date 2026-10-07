@@ -36,7 +36,9 @@ export function positionEditor(n) {
   editor.style.top = tl.y + 'px';
   editor.style.width = (n.w * s) + 'px';
   editor.style.height = (n.h * s) + 'px';
-  editor.style.fontSize = ((n.fontSize || 16) * s) + 'px';
+  const fs = n.fontSize || 16;
+  editor.style.fontSize = (fs * s) + 'px';
+  editor.style.padding = (Math.max(10, fs * 0.6) * s) + 'px';
   editor.style.padding = (10 * s) + 'px';
   editor.style.lineHeight = '1.32';
   editor.style.borderRadius = (12 * s) + 'px';

@@ -193,7 +193,7 @@ function drawNote(n) {
   const fs = n.fontSize || 16;
   ctx.font = `${fs}px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif`;
   ctx.textBaseline = 'top';
-  const pad = 10;
+  const pad = Math.max(10, fs * 0.6);
   const lines = wrapText(n.text || '', n.w - pad * 2);
   let yy = n.y + pad;
   for (const ln of lines) {
