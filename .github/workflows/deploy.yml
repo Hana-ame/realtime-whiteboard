@@ -28,12 +28,10 @@ jobs:
         run: npm run build
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
+        uses: cloudflare/wrangler-action@v4
         env:
           CLOUDFLARE_API_KEY: ${{ secrets.CF_GLOBAL_KEY }}
           CLOUDFLARE_API_EMAIL: ${{ secrets.CF_GLOBAL_EMAIL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         with:
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          project: realtime-whiteboard
-          branch: ${{ github.ref_name }}
-          productionBranch: master
+          command: pages deploy dist --project-name=realtime-whiteboard
