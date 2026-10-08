@@ -153,11 +153,15 @@ function getImageObj(el) {
     decodeGifFrames(el.dataUrl).then(result => {
       const gs = gifState[el.id];
       if (!gs) return; // element was removed during decode
+      // decodeGifFrames returns null for non-GIF / malformed / zero-frame data.
+      // Without this guard the next line dereferences null → TypeError → unhandled
+      // rejection, leaving gifState stuck with frames:null forever (static 1st frame).
+      gs.pending = false;
+      if (!result) return;
       gs.width = result.width;
       gs.height = result.height;
       gs.frames = result.frames;
       gs.durations = result.durations;
-      gs.pending = false;
       if (result.frames.length) {
         // Create a per-frame canvas for putImageData (cached, reused across renders)
         gs.frameCanvas = document.createElement('canvas');
@@ -167,6 +171,9 @@ function getImageObj(el) {
         startGifAnim();
         requestRender();
       }
+    }).catch(() => {
+      const gs = gifState[el.id];
+      if (gs) gs.pending = false;
     });
   }
 
