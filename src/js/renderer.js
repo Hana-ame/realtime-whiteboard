@@ -6,6 +6,7 @@
 import { state, peers, peerId, selfPeerId } from './state.js';
 import { screenToWorld, worldToScreen } from './utils.js';
 import { connEndpoints, noteHandles, contentBounds } from './interaction.js';
+import { decodeGifFrames } from './gif.js';
 
 export const DPR = Math.max(1, window.devicePixelRatio || 1);
 export const GRID = 40;
@@ -88,49 +89,11 @@ const strokeBboxCache = new Map();
 // Cached contentBounds result
 let boundsCache = null;
 
-// GIF animation state: id -> { frames, durations, frameIndex, elapsed, pending }
+// GIF animation state: id -> { width, height, frames: Uint8ClampedArray[],
+//   durations: number[], frameIndex, elapsed, pending, frameCanvas, frameCtx }
 const gifState = {};
 let gifAnimRunning = false;
 let gifRafId = null;
-
-/**
- * Decode all frames of a GIF using the ImageDecoder API.
- * Returns null if ImageDecoder is unavailable (falls back to static first frame).
- */
-async function decodeGifFrames(dataUrl) {
-  if (typeof ImageDecoder === 'undefined') return null;
-  let dec;
-  try {
-    const resp = await fetch(dataUrl);
-    const buf = new Uint8Array(await resp.arrayBuffer());
-    dec = new ImageDecoder({ data: buf, type: 'image/gif' });
-    await dec.decode();
-    const track = dec.track;
-    const n = track.countFrames;
-    if (!n) return null;
-
-    const frames = [];
-    const durations = [];
-    for (let i = 0; i < n; i++) {
-      track.selectFrame(i);
-      await dec.update();
-      // Copy to offscreen canvas — dec.image is invalidated by the next update()
-      const w = dec.image.width, h = dec.image.height;
-      const cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
-      cv.getContext('2d').drawImage(dec.image, 0, 0);
-      dec.image.close(); // Free GPU memory immediately after copying
-      frames.push(cv);
-      const md = dec.getFrameMetadata(i);
-      durations.push(md.duration > 0 ? md.duration : 100);
-    }
-    return { frames, durations };
-  } catch (e) {
-    return null;
-  } finally {
-    try { dec && dec.close(); } catch (_) {}
-  }
-}
 
 function startGifAnim() {
   if (gifAnimRunning) return;
@@ -184,16 +147,23 @@ function getImageObj(el) {
   const cached = imageCache[el.id];
   if (cached && cached._dataUrl === el.dataUrl) return cached;
 
-  // GIF: 触发异步帧解码（ImageDecoder API），解码完成后切到动画模式
+  // GIF: trigger async frame decoding via pure-JS decoder
   if (el.dataUrl && el.dataUrl.startsWith('data:image/gif') && !gifState[el.id]) {
     gifState[el.id] = { frames: null, durations: null, frameIndex: 0, elapsed: 0, pending: true };
     decodeGifFrames(el.dataUrl).then(result => {
       const gs = gifState[el.id];
-      if (!gs) return; // 元素在解码期间被删除
-      gs.frames = result ? result.frames : null;
-      gs.durations = result ? result.durations : null;
+      if (!gs) return; // element was removed during decode
+      gs.width = result.width;
+      gs.height = result.height;
+      gs.frames = result.frames;
+      gs.durations = result.durations;
       gs.pending = false;
-      if (result && result.frames.length) {
+      if (result.frames.length) {
+        // Create a per-frame canvas for putImageData (cached, reused across renders)
+        gs.frameCanvas = document.createElement('canvas');
+        gs.frameCanvas.width = result.width;
+        gs.frameCanvas.height = result.height;
+        gs.frameCtx = gs.frameCanvas.getContext('2d');
         startGifAnim();
         requestRender();
       }
@@ -554,10 +524,21 @@ function drawImageEl(el) {
 
   let drawSource;
 
-  // GIF with decoded frames: draw current animation frame
+  // GIF with decoded frames: render current animation frame via putImageData
   const gs = gifState[el.id];
   if (el.dataUrl && el.dataUrl.startsWith('data:image/gif') && gs && gs.frames && gs.frames.length) {
-    drawSource = gs.frames[gs.frameIndex];
+    // putImageData ignores ctx transforms (scale/rotate), so we draw the RGBA
+    // buffer to an offscreen canvas first, then use drawImage (which honours
+    // the transform) to blit it into place.
+    const fc = gs.frameCanvas;
+    const fx = gs.frameCtx;
+    if (fc && fx) {
+      const frameData = gs.frames[gs.frameIndex];
+      fx.putImageData(new ImageData(frameData, gs.width, gs.height), 0, 0);
+      drawSource = fc;
+    } else {
+      drawSource = getImageObj(el);
+    }
   } else {
     // Static image or GIF fallback (first frame via HTMLImageElement)
     drawSource = getImageObj(el);
