@@ -39,7 +39,30 @@ func revOf(el map[string]interface{}) int {
 	return 0
 }
 
-// applyUpsert 按 rev 更新单个元素。
+// beatsRevCid 与前端 src/js/network.js 的 beats() 完全一致：rev 大者赢；rev
+// 相同则 cid（最后一次改动的客户端 PeerJS id）字典序大者赢。前端所有端都按这条
+// 规则收敛同一个赢家；store 是房间的"真源快照"，必须用同一条规则选胜者。
+// 否则两个端同时改同一元素（rev 平局）时 store 保留的是先到的那个"输家"，
+// 之后任何新成员从 store 拉快照都会拿到错误版本，且因为 rev 相同、以后到达的
+// 赢家也永远覆盖不进去——房间内容长期分叉（见 TestStoreRevTieCID）。
+func beatsRevCid(a, b map[string]interface{}) bool {
+	ar, br := revOf(a), revOf(b)
+	if ar != br {
+		return ar > br
+	}
+	return cidOf(a) > cidOf(b)
+}
+
+// cidOf 取元素的 cid（写入者 PeerJS id），缺失时按空串处理。
+func cidOf(el map[string]interface{}) string {
+	if el == nil {
+		return ""
+	}
+	v, _ := el["cid"].(string)
+	return v
+}
+
+// applyUpsert 按 (rev, cid) 更新单个元素。
 func (s *store) applyUpsert(el map[string]interface{}) {
 	if el == nil {
 		return
@@ -50,7 +73,7 @@ func (s *store) applyUpsert(el map[string]interface{}) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cur, ok := s.elements[id]; !ok || revOf(el) > revOf(cur) {
+	if cur, ok := s.elements[id]; !ok || beatsRevCid(el, cur) {
 		s.elements[id] = el
 	}
 }
@@ -65,7 +88,7 @@ func (s *store) applyDelete(id string) {
 	delete(s.elements, id)
 }
 
-// mergeAll 合并一份快照（来自某成员的 state/fullSync），同样按 rev 取新。
+// mergeAll 合并一份快照（来自某成员的 state/fullSync），同样按 (rev, cid) 取新。
 func (s *store) mergeAll(all map[string]map[string]interface{}) {
 	if len(all) == 0 {
 		return
@@ -76,7 +99,7 @@ func (s *store) mergeAll(all map[string]map[string]interface{}) {
 		if id == "" {
 			continue
 		}
-		if cur, ok := s.elements[id]; !ok || revOf(el) > revOf(cur) {
+		if cur, ok := s.elements[id]; !ok || beatsRevCid(el, cur) {
 			s.elements[id] = el
 		}
 	}

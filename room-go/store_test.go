@@ -127,6 +127,57 @@ func TestStoreRevOf(t *testing.T) {
 	}
 }
 
+// TestStoreRevTieCID rev 平局时按 cid 决胜，与前端 beats() 完全一致（收敛规则
+// 唯一）。修复前 store 只看 rev：两个端同时改同一元素时先到的那个版本卡死在
+// store 里，无论到达顺序如何都不再改变——新成员拉快照会拿到"输家"版本，且
+// 因为 rev 相同，以后到达的赢家也永远覆盖不进去，房间内容长期分叉。
+func TestStoreRevTieCID(t *testing.T) {
+	fromA := parseJSON(t, `{"id":"n1","text":"from-A","rev":5,"cid":"A"}`)
+	fromB := parseJSON(t, `{"id":"n1","text":"from-B","rev":5,"cid":"B"}`)
+
+	// 先 A 后 B：B 赢（cid 大）。
+	s := newStore()
+	s.applyUpsert(fromA)
+	s.applyUpsert(fromB)
+	if got := s.snapshot()["n1"].(map[string]interface{})["text"]; got != "from-B" {
+		t.Fatalf("先 A 后 B 保留 %v，期望 from-B", got)
+	}
+	// 先 B 后 A：仍是 B 赢——胜者不受到达顺序影响，这是收敛的前提。
+	s2 := newStore()
+	s2.applyUpsert(fromB)
+	s2.applyUpsert(fromA)
+	if got := s2.snapshot()["n1"].(map[string]interface{})["text"]; got != "from-B" {
+		t.Fatalf("先 B 后 A 保留 %v，期望 from-B", got)
+	}
+	// rev 不同时仍以 rev 优先：低 rev 高 cid 不得覆盖高 rev 低 cid。
+	s3 := newStore()
+	s3.applyUpsert(parseJSON(t, `{"id":"n1","text":"high-rev","rev":6,"cid":"A"}`))
+	s3.applyUpsert(parseJSON(t, `{"id":"n1","text":"low-rev","rev":5,"cid":"Z"}`))
+	if got := s3.snapshot()["n1"].(map[string]interface{})["text"]; got != "high-rev" {
+		t.Fatalf("rev 优先被破坏：%v", got)
+	}
+	// 完全相同的元素（rev 与 cid 都相等）不覆盖：保持先到的。
+	s4 := newStore()
+	s4.applyUpsert(parseJSON(t, `{"id":"n1","text":"same","rev":5,"cid":"B"}`))
+	s4.applyUpsert(parseJSON(t, `{"id":"n1","text":"same","rev":5,"cid":"B"}`))
+	if got := s4.snapshot()["n1"].(map[string]interface{})["text"]; got != "same" {
+		t.Fatalf("完全相同元素被无谓覆盖：%v", got)
+	}
+}
+
+// TestStoreMergeAllTieCID mergeAll 同样按 (rev, cid) 取新，与 applyUpsert 一致。
+func TestStoreMergeAllTieCID(t *testing.T) {
+	s := newStore()
+	s.applyUpsert(parseJSON(t, `{"id":"a","text":"old","rev":3,"cid":"A"}`))
+	all := map[string]map[string]interface{}{
+		"a": parseJSON(t, `{"id":"a","text":"new-tie","rev":3,"cid":"B"}`),
+	}
+	s.mergeAll(all)
+	if got := s.snapshot()["a"].(map[string]interface{})["text"]; got != "new-tie" {
+		t.Fatalf("mergeAll rev 平局 cid 决胜失败：%v", got)
+	}
+}
+
 // TestStoreSnapshotIsCopy 快照是副本：拿到快照后改它不能污染 store。
 func TestStoreSnapshotIsCopy(t *testing.T) {
 	s := newStore()
