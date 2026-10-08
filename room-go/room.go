@@ -90,12 +90,21 @@ type RoomServer struct {
 	started time.Time
 }
 
+// joinChannel 是 onDataChannel 需要的 DataChannel 能力子集。*webrtc.DataChannel
+// 天然满足；抽象成接口是为了让"打开后再推送"的时序逻辑能脱离 WebRTC 单测。
+type joinChannel interface {
+	OnMessage(func(webrtc.DataChannelMessage))
+	OnClose(func())
+	OnOpen(func())
+	SendText(string) error
+}
+
 // roomConn 是与单个浏览器之间的一条 PeerJS data 连接。
 type roomConn struct {
 	connID string
 	peerID string
 	pc     *webrtc.PeerConnection
-	dc     *webrtc.DataChannel
+	dc     joinChannel
 }
 
 // sigMsg 是 PeerJS 1.x 的信令消息信封。
@@ -523,7 +532,17 @@ func (s *RoomServer) handleCandidate(msg sigMsg) {
 }
 
 // onDataChannel 是 data channel 打开后的入口：登记成员、推送快照、通知全员组网。
-func (s *RoomServer) onDataChannel(connID string, dc *webrtc.DataChannel) {
+//
+// 注意时序：pion 在 OnDataChannel 回调期间，这个 DataChannel 仍处于 connecting
+// 状态（acceptDataChannels 先执行 <-r.onDataChannel(rtcDC) 调用户 handler，之后
+// 才 rtcDC.handleOpen 置 Open）；而 SendText 在 channel 未 open 时直接返回
+// io.ErrClosedPipe，消息不缓冲、静默丢失。所以快照与 peer_list 的推送绝不能放
+// 在这个回调里同步做——必须注册 dc.OnOpen，等 handleOpen 把状态置为 open 之后
+// （对远端 channel，pion 会在 handleOpen 末尾同步触发 onOpen）再发送。
+// 修复前的行为：新成员加入时三封消息全部发送失败——它永远收不到初始快照，
+// 也收不到已有成员名单；老成员也永远收不到 peer_list 通知，全网状拓扑搭不起来，
+// 两个浏览器互相不知道对方存在，"加入房间后画板无法同步"。
+func (s *RoomServer) onDataChannel(connID string, dc joinChannel) {
 	if dc == nil {
 		return
 	}
@@ -546,13 +565,23 @@ func (s *RoomServer) onDataChannel(connID string, dc *webrtc.DataChannel) {
 
 	dc.OnMessage(func(m webrtc.DataChannelMessage) { s.onMessage(rc, m) })
 	dc.OnClose(func() { s.closeConn(connID, "data channel 关闭") })
+	dc.OnOpen(func() { s.pushJoinPackets(rc) })
+}
 
+// pushJoinPackets 在 data channel 真正 open 之后向新成员推送：
+//
+//  1. 房间快照 —— 给新成员一次完整同步（房内内容不依赖任何单个浏览器存活）；
+//  2. 已有成员名单（tellNewcomer）—— 让新成员主动直连；
+//  3. 新成员名单（announceNewcomer）—— 通知老成员直连新成员，凑齐 Full Mesh。
+//
+// 若 store 为空或房间只有自己，对应的消息自然省略。
+func (s *RoomServer) pushJoinPackets(rc *roomConn) {
 	// 1) 用房间快照给新成员一次完整同步。
 	if sn := s.store.snapshot(); len(sn) > 0 {
-		if err := dc.SendText(string(mustJSON(map[string]interface{}{
+		if err := rc.dc.SendText(string(mustJSON(map[string]interface{}{
 			"t": "state", "fullSync": true, "elements": sn,
 		}))); err != nil {
-			log.Printf("向 %s 推送快照失败：%v", srcPeer, err)
+			log.Printf("向 %s 推送快照失败：%v", rc.peerID, err)
 		}
 	}
 	// 2) 告诉新成员已有成员名单，让它主动直连。
