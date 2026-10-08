@@ -619,9 +619,11 @@ func (s *RoomServer) onMessage(rc *roomConn, m webrtc.DataChannelMessage) {
 	case "request":
 		// 新成员请求同步：用房间快照回应。
 		if sn := s.store.snapshot(); len(sn) > 0 {
-			_ = rc.dc.SendText(string(mustJSON(map[string]interface{}{
+			if err := rc.dc.SendText(string(mustJSON(map[string]interface{}{
 				"t": "state", "fullSync": true, "elements": sn,
-			})))
+			}))); err != nil {
+				log.Printf("request 回包失败 peer=%s conn=%s: %v", rc.peerID, rc.connID, err)
+			}
 		}
 		return // request 本身不需要转发
 	}
@@ -696,7 +698,9 @@ func (s *RoomServer) tellNewcomer(rc *roomConn) {
 	if len(list) == 0 {
 		return
 	}
-	_ = rc.dc.SendText(string(mustJSON(map[string]interface{}{"t": "peer_list", "list": list})))
+	if err := rc.dc.SendText(string(mustJSON(map[string]interface{}{"t": "peer_list", "list": list}))); err != nil {
+		log.Printf("tellNewcomer 发送失败 peer=%s conn=%s: %v", rc.peerID, rc.connID, err)
+	}
 }
 
 // announceNewcomer 把新成员名单发给其余成员（让它们直连新成员）。
@@ -717,7 +721,10 @@ func (s *RoomServer) announceNewcomer(rc *roomConn) {
 	}
 	s.connMu.RUnlock()
 	for _, t := range targets {
-		_ = t.dc.SendText(payload)
+		if err := t.dc.SendText(payload); err != nil {
+			log.Printf("announceNewcomer 发送失败 peer=%s conn=%s: %v", t.peerID, t.connID, err)
+			s.closeConn(t.connID, "announceNewcomer 发送失败")
+		}
 	}
 }
 
@@ -737,11 +744,18 @@ func (s *RoomServer) broadcastPeerList() {
 	}
 	s.connMu.RUnlock()
 	for _, t := range targets {
-		_ = t.dc.SendText(payload)
+		if err := t.dc.SendText(payload); err != nil {
+			log.Printf("broadcastPeerList 发送失败 peer=%s conn=%s: %v", t.peerID, t.connID, err)
+			s.closeConn(t.connID, "broadcastPeerList 发送失败")
+		}
 	}
 }
 
 // relay 把一条原始消息转发给除 src 之外的所有成员。
+//
+// SendText 失败必须打日志：浏览器↔room 的 data channel 一旦半关闭（ICE 抖动、
+// PeerJS 云回收空闲连接），SendText 会立刻返回错误。原实现 `_ = ...` 静默吞掉，
+// 表现就是"WebRTC 连上了但画板不同步"——relay 看似执行了，目标端实际收不到。
 func (s *RoomServer) relay(src *roomConn, body string) {
 	s.connMu.RLock()
 	targets := make([]*roomConn, 0, len(s.conns))
@@ -753,7 +767,10 @@ func (s *RoomServer) relay(src *roomConn, body string) {
 	}
 	s.connMu.RUnlock()
 	for _, t := range targets {
-		_ = t.dc.SendText(body)
+		if err := t.dc.SendText(body); err != nil {
+			log.Printf("转发失败 peer=%s conn=%s: %v", t.peerID, t.connID, err)
+			s.closeConn(t.connID, "relay SendText 失败")
+		}
 	}
 }
 
