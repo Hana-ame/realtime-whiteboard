@@ -20,25 +20,19 @@ import (
 )
 
 const (
-	// peerjsVersion 必须与前端 node_modules/peerjs 的版本一致：信令握手时客户端
-	// 会把版本写在 URL 查询参数里，服务器按版本协商协议。
 	peerjsVersion = "1.5.5"
 
 	defaultPeerHost = "0.peerjs.com"
 	defaultPeerKey  = "peerjs"
 
-	writeTimeout = 15 * time.Second // 单次信令写入超时
-	reconnectGap = 3 * time.Second  // 断线重连间隔
-	maxRelayed   = 4096             // 中继去重缓存上限
+	writeTimeout = 15 * time.Second
+	reconnectGap = 3 * time.Second
+	maxRelayed   = 4096
 )
 
 var errNotConnected = errors.New("未连接到 PeerJS 信令服务器")
-
-// errIDTaken 表示房间号已被另一个在线实例占用。这和断线不同：只要那个实例在跑，
-// 重试永远拿不到这个 id，所以 Run 收到它就直接退出而不是按重连节奏硬刷。
 var errIDTaken = errors.New("房间号已被占用")
 
-// Options 是 RoomServer 的构造参数。
 type Options struct {
 	RoomName  string
 	Host      string
@@ -46,52 +40,31 @@ type Options struct {
 	Heartbeat time.Duration
 }
 
-// RoomServer 是一个无头 PeerJS 房间。它以一个固定 room id 挂在 PeerJS 信令网络
-// 上，除了"占住房间号"之外还承担三件事：
-//
-//  1. 成员登记 —— 新加入的浏览器会收到当前成员名单(peer_list)，于是主动与已有
-//     成员互连，凑成前端期望的 Full Mesh 拓扑；
-//  2. 状态存储 —— 维护白板元素快照，新成员上线立即拿到完整同步，即使目前
-//     没有任何浏览器在线，房间的画布内容也不会丢；
-//  3. 消息中继 —— 把 upsert/delete/state 转发给其他成员，在两台浏览器无法直连
-//     （双向 NAT、缺少中继等）时兜底。前端按 mid 去重，重复消息无害。
-//
-// 协议要点（与 peerjs 1.5.5 实测一致，见 node_modules/peerjs/dist/bundler.mjs）：
-//
-//   - 没有 REGISTER 消息。peer id 通过 WebSocket URL 传递：
-//     wss://<host>/peerjs?key=peerjs&id=<room>&token=<rand>&version=1.5.5，
-//     服务器注册完成后回 {"type":"OPEN"}。
-//   - 信封为 {"type","payload","src","dst"}：src 由信令服务器补充，dst 由发送方
-//     指定。payload 里并不含 srcPeer。
-//   - payload.candidate 是 RTCIceCandidateInit 对象 {candidate,sdpMid,sdpMLineIndex}，
-//     不是字符串。
-//   - 每条 data 连接对应一个独立的 PeerConnection；作为应答方只接收 data channel，
-//     绝不能主动 CreateDataChannel（发起方才创建）。
 type RoomServer struct {
 	RoomName  string
-	Host      string // 归一化后的 host:port
+	Host      string
 	Key       string
 	Heartbeat time.Duration
 
 	wsURL string
 
 	mu      sync.Mutex
-	ws      *websocket.Conn // 非 nil 表示信令链路活着
-	idTaken bool            // 收到 ID-TAKEN 后置位，Run 据此退出而非重连
+	ws      *websocket.Conn
+	idTaken bool
 
 	connMu  sync.RWMutex
-	conns   map[string]*roomConn // connectionId -> 连接
-	pending map[string]string    // connectionId -> 发起方 peer id（data channel 到达前登记）
+	conns   map[string]*roomConn
+	pending map[string]string
 
-	seenMu sync.Mutex
-	seen   map[string]struct{} // 已中继过的 mid
+	seenMu   sync.Mutex
+	seen     map[string]struct{}
+	seenRing []string
+	seenIdx  int
 
 	store   *store
 	started time.Time
 }
 
-// joinChannel 是 onDataChannel 需要的 DataChannel 能力子集。*webrtc.DataChannel
-// 天然满足；抽象成接口是为了让"打开后再推送"的时序逻辑能脱离 WebRTC 单测。
 type joinChannel interface {
 	OnMessage(func(webrtc.DataChannelMessage))
 	OnClose(func())
@@ -99,7 +72,6 @@ type joinChannel interface {
 	SendText(string) error
 }
 
-// roomConn 是与单个浏览器之间的一条 PeerJS data 连接。
 type roomConn struct {
 	connID string
 	peerID string
@@ -107,7 +79,6 @@ type roomConn struct {
 	dc     joinChannel
 }
 
-// sigMsg 是 PeerJS 1.x 的信令消息信封。
 type sigMsg struct {
 	Type    string                 `json:"type"`
 	Payload map[string]interface{} `json:"payload"`
@@ -154,13 +125,13 @@ func NewRoomServer(o Options) *RoomServer {
 		wsURL:     u.String(),
 		conns:     map[string]*roomConn{},
 		pending:   map[string]string{},
-		seen:      map[string]struct{}{},
+		seen:      make(map[string]struct{}, maxRelayed),
+		seenRing:  make([]string, 0, maxRelayed),
 		store:     newStore(),
 		started:   time.Now(),
 	}
 }
 
-// Run 阻塞直到 ctx 取消，负责连接信令服务器、收发消息，并在断线后自动重连。
 func (s *RoomServer) Run(ctx context.Context) error {
 	attempt := 0
 	for {
@@ -217,8 +188,6 @@ type readResult struct {
 	err    error
 }
 
-// readLoop 阻塞读信令消息。每次读都在独立 goroutine 里做，这样 ctx 取消时
-// 可以先 teardown（关闭 ws）再退出，不会把 goroutine 卡在 ReadMessage 上。
 func (s *RoomServer) readLoop(ctx context.Context) error {
 	for {
 		if err := ctx.Err(); err != nil {
@@ -261,7 +230,6 @@ func (s *RoomServer) readOnce() (int, []byte, error) {
 	return ws.ReadMessage()
 }
 
-// sendJSON 发出一条信令消息。所有写入共用一把锁：gorilla/websocket 不支持并发写。
 func (s *RoomServer) sendJSON(v interface{}) error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -279,7 +247,6 @@ func (s *RoomServer) sendJSON(v interface{}) error {
 	return ws.WriteMessage(websocket.TextMessage, data)
 }
 
-// teardown 关闭信令链路与全部 WebRTC 连接（幂等）。
 func (s *RoomServer) teardown() {
 	s.mu.Lock()
 	ws := s.ws
@@ -319,7 +286,6 @@ func (s *RoomServer) startHeartbeat(ctx context.Context) {
 	}()
 }
 
-// markIDTaken 记录收到过 ID-TAKEN。
 func (s *RoomServer) markIDTaken() {
 	s.mu.Lock()
 	s.idTaken = true
@@ -336,49 +302,34 @@ func (s *RoomServer) handleMessage(msg sigMsg) {
 	switch msg.Type {
 	case "OPEN":
 		log.Printf("房间 %q 已上线，浏览器可用该房间号加入", s.RoomName)
-
 	case "HEARTBEAT":
-		// 服务器回的心跳，无需处理。
-
 	case "ERROR":
 		log.Printf("信令服务器返回错误：%v", msg.Payload)
-
 	case "ID-TAKEN":
-		// 信令服务器随后会关掉这条连接，readLoop 随之返回，Run 靠下面的
-		// isIDTaken 区分「撞名」和「网络抖动」两种断线原因。
 		s.markIDTaken()
 		log.Printf("房间号 %q 已被占用（可能是上一个实例还没退出），换一个名字或稍后再试", s.RoomName)
-
 	case "INVALID-KEY":
 		log.Printf("PeerJS key %q 无效", s.Key)
-
 	case "OFFER":
 		s.handleOffer(msg)
-
 	case "ANSWER":
-		// 我们只作为应答方，正常不会收到 ANSWER。
 		log.Printf("收到意外的 ANSWER（src=%s）", s.srcOf(msg))
-
 	case "CANDIDATE":
 		s.handleCandidate(msg)
-
 	case "CLOSE":
 		if id, _ := msg.Payload["connectionId"].(string); id != "" {
 			s.closeConn(id, "对端关闭连接")
 		}
-
 	case "LEAVE", "EXPIRE":
 		if src := s.srcOf(msg); src != "" {
 			log.Printf("成员 %s 离线", src)
 			s.closeAllForPeer(src, "成员离线")
 		}
-
 	default:
 		log.Printf("未处理的消息类型 %s（src=%s）", msg.Type, s.srcOf(msg))
 	}
 }
 
-// srcOf 取消息发起方的 peer id：优先顶层 src（信令服务器补充），兼容 payload.srcPeer。
 func (s *RoomServer) srcOf(msg sigMsg) string {
 	if msg.Src != "" {
 		return msg.Src
@@ -391,7 +342,6 @@ func (s *RoomServer) srcOf(msg sigMsg) string {
 	return ""
 }
 
-// handleOffer 处理浏览器发起的连接请求，建立一条独立的 PeerConnection 并回 ANSWER。
 func (s *RoomServer) handleOffer(msg sigMsg) {
 	p := msg.Payload
 	if p == nil {
@@ -423,12 +373,11 @@ func (s *RoomServer) handleOffer(msg sigMsg) {
 		return
 	}
 
-	// data channel 由发起方创建；我们只接收（对应 peerjs 的 ondatachannel -> _initializeDataChannel）。
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		s.onDataChannel(connID, dc)
 	})
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil { // nil 表示收集结束
+		if c == nil {
 			return
 		}
 		_ = s.sendJSON(sigMsg{
@@ -458,7 +407,7 @@ func (s *RoomServer) handleOffer(msg sigMsg) {
 	rc := &roomConn{connID: connID, peerID: srcPeer, pc: pc}
 
 	s.connMu.Lock()
-	if old, ok := s.conns[connID]; ok { // 重复的 connectionId：替换旧连接
+	if old, ok := s.conns[connID]; ok {
 		if old.pc != nil {
 			_ = old.pc.Close()
 		}
@@ -502,7 +451,6 @@ func (s *RoomServer) handleOffer(msg sigMsg) {
 	}
 }
 
-// handleCandidate 把收到的 ICE candidate 送到对应的 PeerConnection。
 func (s *RoomServer) handleCandidate(msg sigMsg) {
 	p := msg.Payload
 	if p == nil {
@@ -531,17 +479,6 @@ func (s *RoomServer) handleCandidate(msg sigMsg) {
 	}
 }
 
-// onDataChannel 是 data channel 打开后的入口：登记成员、推送快照、通知全员组网。
-//
-// 注意时序：pion 在 OnDataChannel 回调期间，这个 DataChannel 仍处于 connecting
-// 状态（acceptDataChannels 先执行 <-r.onDataChannel(rtcDC) 调用户 handler，之后
-// 才 rtcDC.handleOpen 置 Open）；而 SendText 在 channel 未 open 时直接返回
-// io.ErrClosedPipe，消息不缓冲、静默丢失。所以快照与 peer_list 的推送绝不能放
-// 在这个回调里同步做——必须注册 dc.OnOpen，等 handleOpen 把状态置为 open 之后
-// （对远端 channel，pion 会在 handleOpen 末尾同步触发 onOpen）再发送。
-// 修复前的行为：新成员加入时三封消息全部发送失败——它永远收不到初始快照，
-// 也收不到已有成员名单；老成员也永远收不到 peer_list 通知，全网状拓扑搭不起来，
-// 两个浏览器互相不知道对方存在，"加入房间后画板无法同步"。
 func (s *RoomServer) onDataChannel(connID string, dc joinChannel) {
 	if dc == nil {
 		return
@@ -557,7 +494,7 @@ func (s *RoomServer) onDataChannel(connID string, dc joinChannel) {
 		return
 	}
 	if rc.dc != nil {
-		return // 幂等：data channel 只处理一次
+		return
 	}
 	rc.dc = dc
 
@@ -568,15 +505,7 @@ func (s *RoomServer) onDataChannel(connID string, dc joinChannel) {
 	dc.OnOpen(func() { s.pushJoinPackets(rc) })
 }
 
-// pushJoinPackets 在 data channel 真正 open 之后向新成员推送：
-//
-//  1. 房间快照 —— 给新成员一次完整同步（房内内容不依赖任何单个浏览器存活）；
-//  2. 已有成员名单（tellNewcomer）—— 让新成员主动直连；
-//  3. 新成员名单（announceNewcomer）—— 通知老成员直连新成员，凑齐 Full Mesh。
-//
-// 若 store 为空或房间只有自己，对应的消息自然省略。
 func (s *RoomServer) pushJoinPackets(rc *roomConn) {
-	// 1) 用房间快照给新成员一次完整同步。
 	if sn := s.store.snapshot(); len(sn) > 0 {
 		if err := rc.dc.SendText(string(mustJSON(map[string]interface{}{
 			"t": "state", "fullSync": true, "elements": sn,
@@ -584,13 +513,10 @@ func (s *RoomServer) pushJoinPackets(rc *roomConn) {
 			log.Printf("向 %s 推送快照失败：%v", rc.peerID, err)
 		}
 	}
-	// 2) 告诉新成员已有成员名单，让它主动直连。
 	s.tellNewcomer(rc)
-	// 3) 通知其他成员有新成员，让它们直连新成员 —— 凑齐 Full Mesh。
 	s.announceNewcomer(rc)
 }
 
-// onMessage 处理一条白板消息：更新快照，然后把原样字节转发给其他成员。
 func (s *RoomServer) onMessage(rc *roomConn, m webrtc.DataChannelMessage) {
 	var msg struct {
 		T        string                 `json:"t"`
@@ -617,7 +543,6 @@ func (s *RoomServer) onMessage(rc *roomConn, m webrtc.DataChannelMessage) {
 			s.store.mergeAll(asMapOfMaps(msg.Elements))
 		}
 	case "request":
-		// 新成员请求同步：用房间快照回应。
 		if sn := s.store.snapshot(); len(sn) > 0 {
 			if err := rc.dc.SendText(string(mustJSON(map[string]interface{}{
 				"t": "state", "fullSync": true, "elements": sn,
@@ -625,17 +550,14 @@ func (s *RoomServer) onMessage(rc *roomConn, m webrtc.DataChannelMessage) {
 				log.Printf("request 回包失败 peer=%s conn=%s: %v", rc.peerID, rc.connID, err)
 			}
 		}
-		return // request 本身不需要转发
+		return
 	}
 
-	// 按 mid 去重后再转发：全网状 + 中继会让同一条消息走多条路径到达同一浏览器。
 	if !s.isNewMid(msg.Mid) {
 		return
 	}
 	s.relay(rc, string(m.Data))
 }
-
-// ---- 连接与成员管理 ----
 
 func (s *RoomServer) removeConn(connID string) *roomConn {
 	s.connMu.Lock()
@@ -652,7 +574,6 @@ func (s *RoomServer) removeConn(connID string) *roomConn {
 	return rc
 }
 
-// closeConn 移除一条连接，并让其余成员刷新成员名单。
 func (s *RoomServer) closeConn(connID, why string) {
 	rc := s.removeConn(connID)
 	if rc == nil {
@@ -662,7 +583,6 @@ func (s *RoomServer) closeConn(connID, why string) {
 	s.broadcastPeerList()
 }
 
-// closeAllForPeer 移除某个 peer 的全部连接（该 peer 从信令网络断开时调用）。
 func (s *RoomServer) closeAllForPeer(peerID, why string) {
 	s.connMu.RLock()
 	ids := make([]string, 0, 1)
@@ -692,7 +612,6 @@ func (s *RoomServer) peerIDs(excludeConnID string) []string {
 	return out
 }
 
-// tellNewcomer 只把"其他成员"名单发给新成员（让它自己发起直连）。
 func (s *RoomServer) tellNewcomer(rc *roomConn) {
 	list := s.peerIDs(rc.connID)
 	if len(list) == 0 {
@@ -703,7 +622,6 @@ func (s *RoomServer) tellNewcomer(rc *roomConn) {
 	}
 }
 
-// announceNewcomer 把新成员名单发给其余成员（让它们直连新成员）。
 func (s *RoomServer) announceNewcomer(rc *roomConn) {
 	if rc.peerID == "" {
 		return
@@ -728,7 +646,6 @@ func (s *RoomServer) announceNewcomer(rc *roomConn) {
 	}
 }
 
-// broadcastPeerList 把当前成员名单广播给所有成员（成员离开后调用）。
 func (s *RoomServer) broadcastPeerList() {
 	list := s.peerIDs("")
 	if len(list) == 0 {
@@ -751,11 +668,6 @@ func (s *RoomServer) broadcastPeerList() {
 	}
 }
 
-// relay 把一条原始消息转发给除 src 之外的所有成员。
-//
-// SendText 失败必须打日志：浏览器↔room 的 data channel 一旦半关闭（ICE 抖动、
-// PeerJS 云回收空闲连接），SendText 会立刻返回错误。原实现 `_ = ...` 静默吞掉，
-// 表现就是"WebRTC 连上了但画板不同步"——relay 看似执行了，目标端实际收不到。
 func (s *RoomServer) relay(src *roomConn, body string) {
 	s.connMu.RLock()
 	targets := make([]*roomConn, 0, len(s.conns))
@@ -774,6 +686,7 @@ func (s *RoomServer) relay(src *roomConn, body string) {
 	}
 }
 
+// isNewMid 使用环形滑动窗口淘汰最旧的 mid，避免原版满载清空导致瞬间去重失效。
 func (s *RoomServer) isNewMid(mid string) bool {
 	if mid == "" {
 		return true
@@ -783,10 +696,15 @@ func (s *RoomServer) isNewMid(mid string) bool {
 	if _, ok := s.seen[mid]; ok {
 		return false
 	}
-	s.seen[mid] = struct{}{}
-	if len(s.seen) > maxRelayed {
-		s.seen = map[string]struct{}{} // 简单淘汰：满了就清空
+	if len(s.seenRing) < maxRelayed {
+		s.seenRing = append(s.seenRing, mid)
+	} else {
+		oldest := s.seenRing[s.seenIdx]
+		delete(s.seen, oldest)
+		s.seenRing[s.seenIdx] = mid
+		s.seenIdx = (s.seenIdx + 1) % maxRelayed
 	}
+	s.seen[mid] = struct{}{}
 	return true
 }
 
@@ -808,8 +726,6 @@ func (s *RoomServer) signalingUp() bool {
 	return s.ws != nil
 }
 
-// ---- 状态 HTTP 接口（运维用） ----
-
 func (s *RoomServer) Stats() map[string]interface{} {
 	return map[string]interface{}{
 		"status":    "ok",
@@ -823,7 +739,6 @@ func (s *RoomServer) Stats() map[string]interface{} {
 	}
 }
 
-// ServeHTTP 暴露 /health 与 /dump，方便在 VPS 上做存活探测和数据导出。
 func (s *RoomServer) ServeHTTP(ctx context.Context, addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -847,10 +762,6 @@ func (s *RoomServer) ServeHTTP(ctx context.Context, addr string) {
 	}()
 }
 
-// ---- 辅助函数 ----
-
-// normalizeHost 把 "0.peerjs.com" / "0.peerjs.com:443" / "wss://h:443" 归一成
-// "host:port" + 是否走 TLS。
 func normalizeHost(host string) (string, bool) {
 	h := strings.TrimSpace(host)
 	secure := true
@@ -875,8 +786,6 @@ func normalizeHost(host string) (string, bool) {
 	return h, secure
 }
 
-// sdpFromPayload 取出 payload.sdp 的 type 与 sdp 文本。peerjs 把 RTCSessionDescription
-// 对象原样放进来，所以是 {type, sdp}；个别实现会直接给字符串，这里两种都兼容。
 func sdpFromPayload(p map[string]interface{}) (webrtc.SDPType, string) {
 	switch v := p["sdp"].(type) {
 	case map[string]interface{}:
@@ -905,8 +814,6 @@ func parseSDPType(t string) webrtc.SDPType {
 	}
 }
 
-// candidateFromPayload 取出 ICE candidate。peerjs 放的是 RTCIceCandidateInit 对象，
-// 不是纯字符串；两种都兼容。
 func candidateFromPayload(p map[string]interface{}) (string, *string, *uint16) {
 	switch v := p["candidate"].(type) {
 	case map[string]interface{}:
@@ -928,8 +835,6 @@ func candidateFromPayload(p map[string]interface{}) (string, *string, *uint16) {
 	}
 }
 
-// asMapOfMaps 把 map[string]interface{} 转成 map[string]map[string]interface{}，
-// 丢弃无法解析成对象的条目。
 func asMapOfMaps(in map[string]interface{}) map[string]map[string]interface{} {
 	if in == nil {
 		return nil
@@ -943,16 +848,6 @@ func asMapOfMaps(in map[string]interface{}) map[string]map[string]interface{} {
 	return out
 }
 
-// iceServers 必须与浏览器端 peerjs 的 defaultConfig 一致，否则两端拿到的
-// candidate 集合不同，NAT 穿透会失败。peerjs 的 defaultConfig 除 STUN 外
-// 还自带 TURN 中继（见 node_modules/peerjs/dist/bundler.mjs 的 eu 常量）：
-//
-//	{urls:"stun:stun.l.google.com:19302"},
-//	{urls:["turn:eu-0.turn.peerjs.com:3478","turn:us-0.turn.peerjs.com:3478"],
-//	 username:"peerjs", credential:"peerjsp"}
-//
-// 少了 TURN，Go 端只能拿到 host/reflexive candidate，在对称 NAT 后面
-// 会连不上浏览器。
 func iceServers() []webrtc.ICEServer {
 	return []webrtc.ICEServer{
 		{URLs: []string{"stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"}},

@@ -1,14 +1,15 @@
 /**
  * Tests for src/js/gif.js — pure-JS animated-GIF frame decoder.
  *
- * Validates structure, error handling, and basic pixel content.
- * Full pixel-level comparison against PIL ground truth is done by
- * /tmp/giftest/compare.mjs.
+ * Uses self-contained repository fixtures in tests/fixtures/gif/ (with fallback
+ * to /tmp/giftest) so tests never fail with ENOENT on fresh checkouts.
  */
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import {
   GIF_DATA_PREFIX,
   dataUrlToBytes,
@@ -17,10 +18,14 @@ import {
   decodeGifFrames,
 } from '../src/js/gif.js';
 
-const HERE = '/tmp/giftest';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const FIXTURES_DIR = resolve(__dirname, 'fixtures', 'gif');
+const FALLBACK_DIR = '/tmp/giftest';
 
 function loadAsset(name) {
-  return readFileSync(`${HERE}/${name}.gif`);
+  const localPath = resolve(FIXTURES_DIR, `${name}.gif`);
+  if (existsSync(localPath)) return readFileSync(localPath);
+  return readFileSync(`${FALLBACK_DIR}/${name}.gif`);
 }
 
 function toDataURL(bytes) {
@@ -34,8 +39,6 @@ function allPixels(buf, r, g, b, a = 255) {
   }
   return true;
 }
-
-// ── dataUrlToBytes ──────────────────────────────────────────────────────────
 
 describe('dataUrlToBytes', () => {
   test('decodes base64 payload', () => {
@@ -60,8 +63,6 @@ describe('dataUrlToBytes', () => {
   });
 });
 
-// ── lzwDecode ──────────────────────────────────────────────────────────────
-
 describe('lzwDecode', () => {
   test('decodes all-zeros stream (minCodeSize=2)', () => {
     const basic = loadAsset('basic');
@@ -69,7 +70,7 @@ describe('lzwDecode', () => {
     if (basic[p] === 0x21 && basic[p + 1] === 0xff) { p += 2; while (basic[p] > 0) { p += 1 + basic[p]; } p++; }
     if (basic[p] === 0x21 && basic[p + 1] === 0xf9) { p += 2; while (basic[p] > 0) { p += 1 + basic[p]; } p++; }
     if (basic[p] === 0x2c) {
-      p += 10; // 0x2c + 2+2+2+2+1 bytes
+      p += 10;
       const mc = basic[p++];
       const data = [];
       while (basic[p] > 0) { const sz = basic[p]; data.push(...Array.from(basic.slice(p + 1, p + 1 + sz))); p += 1 + sz; }
@@ -80,7 +81,6 @@ describe('lzwDecode', () => {
   });
 
   test('handles EOI correctly', () => {
-    // CLEAR, 0, 1, EOI → [0, 1]
     const result = lzwDecode(2, new Uint8Array([68, 10]));
     assert.deepEqual(result, [0, 1]);
   });
@@ -94,8 +94,6 @@ describe('lzwDecode', () => {
     assert.ok(Array.isArray(result));
   });
 });
-
-// ── parseGif ───────────────────────────────────────────────────────────────
 
 describe('parseGif', () => {
   test('basic: two solid frames, global palette', () => {
@@ -165,8 +163,6 @@ describe('parseGif', () => {
   });
 });
 
-// ── decodeGifFrames ────────────────────────────────────────────────────────
-
 describe('decodeGifFrames', () => {
   test('decodes a basic GIF via data: URL', async () => {
     const url = toDataURL(loadAsset('basic'));
@@ -191,8 +187,6 @@ describe('decodeGifFrames', () => {
     assert.equal(await decodeGifFrames('data:image/gif;base64,AAA'), null);
   });
 });
-
-// ── end-to-end: all assets parse without errors ───────────────────────────
 
 describe('end-to-end: all assets parse', () => {
   const assets = ['basic', 'interlace', 'transp', 'disposal2', 'disposal3', 'lct', 'subimg', 'mincode2'];

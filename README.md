@@ -1,45 +1,51 @@
 # Realtime Whiteboard
 
-A formal, well-structured real-time collaborative whiteboard application.
+A real-time collaborative whiteboard application built with HTML5 Canvas, WebRTC (PeerJS), and an optional headless Go room daemon.
 
 ## Features
-- Infinite canvas with panning and zooming
-- Sticky notes, freehand drawing, and connecting lines
-- Paste images (<kbd>Ctrl+V</kbd>) with peer-to-peer distribution & local storage
-- Realtime collaboration via WebRTC (PeerJS)
-- Minimap for easy navigation
-- Undo/redo stack
-- Interactive toolbars and palettes
+- **Infinite Canvas**: Smooth panning, cursor-anchored zooming, viewport culling, and interactive minimap
+- **Rich Elements**: Sticky notes (customizable font size, background/text opacity, rotation), freehand strokes (with RDP point simplification), rotation-aware directional connections, and images/animated GIFs (pure-JS frame decoder)
+- **Context-Aware Property Bar**: Automatically surfaces style controls when selecting any existing note, stroke, or connection
+- **Collaborative Undo / Redo & Duplication**: Incremental CRDT delta propagation on `Ctrl+Z` / `Ctrl+Y` and one-click element duplication (`Ctrl+D`)
+- **Resilient P2P & Room Sync**:
+  - Deterministic `(rev, cid)` LWW-Element-Set conflict resolution and tombstone sync
+  - Sliding-window FIFO message deduplication (`BoundedSet`)
+  - Connection glare protection and transparent 48 KB WebRTC DataChannel chunking/reassembly
+  - One-click room leave (`离开房间`) restoring personal persisted whiteboard while keeping foreign room canvases strictly in-memory
 
-## Setup Instructions
+## Architecture Overview
+- `src/js/app.js`: Application bootstrap and storage migration
+- `src/js/events.js`: Synchronous `EventBus` decoupling state, renderer, toolbar, and network layers
+- `src/js/crdt.js`: Deterministic `(rev, cid)` conflict resolution, live-drag property merging, and undo/redo state diffing
+- `src/js/geometry.js`: Pure 2D spatial math, rotation-aware hit testing, handle layout, and stroke simplification
+- `src/js/state.js`: Central state store, room-scoped persistence, and collaborative undo/redo stack
+- `src/js/network.js`: PeerJS mesh & room connection lifecycle, chunking, and tombstone sync
+- `src/js/renderer.js`: Viewport-culled HTML5 Canvas renderer, lazy image queue, and GIF frame animator
+- `src/js/interaction.js`: Pointer, touch (pinch-to-zoom), and keyboard interaction state machine
+- `src/js/toolbar.js`: Tool switcher, context-sensitive property bar, and zoom/history controls
+- `src/js/editor.js`: Transparent in-place note text editor overlay
+- `src/js/gif.js`: Pure-JS GIF89a LZW frame decoder
+- `src/js/utils.js`: Coordinate transforms, `BoundedSet`, and utilities
+- `room-go/`: Headless Go PeerJS/WebRTC room server with versioned tombstones and ring-buffer relay deduplication
+
+## Setup & Testing
 
 1. Install dependencies:
    ```bash
    npm install
    ```
 
-2. Start the development server:
+2. Run regression & unit test suite:
+   ```bash
+   npm test
+   ```
+
+3. Start the development server:
    ```bash
    npm run dev
    ```
 
-3. Build for production:
+4. Build for production:
    ```bash
    npm run build
    ```
-
-## GitHub Pages Deployment
-
-The repository is configured for automated GitHub Pages deployment:
-1. Push this project to your GitHub repository.
-2. In your repository on GitHub, navigate to **Settings** > **Pages**.
-3. Under **Build and deployment** > **Source**, select **GitHub Actions**.
-4. Pushes to `main` or `master` will trigger the workflow (`.github/workflows/deploy.yml`) and deploy the site automatically.
-
-## Architecture Overview
-- `src/js/app.js`: Main entry point
-- `src/js/state.js`: Global state management and synchronization
-- `src/js/renderer.js`: Canvas drawing routines
-- `src/js/interaction.js`: Pointer/keyboard event handling
-- `src/js/network.js`: PeerJS setup and P2P communication
-- `src/css/*`: Modularized CSS stylesheets

@@ -1,38 +1,82 @@
+/**
+ * PeerJS WebRTC P2P Mesh & Room Synchronization Layer
+ *
+ * Improvements in refactored network layer:
+ * 1. Connection lifecycle guard: prevents stale/replaced connection `close`/`error`
+ *    events from evicting an active replacement connection in `conns[peerId]`.
+ * 2. Sliding-window deduplication (`BoundedSet`): replaces abrupt `seen.clear()`
+ *    wipes with FIFO eviction so in-flight mesh relays never echo.
+ * 3. Transparent large-payload chunking (`CHUNK_THRESHOLD = 48 KB`): splits
+ *    oversized messages (e.g., high-res images or large snapshots) into chunks
+ *    and reassembles them with TTL cleanup, while keeping standard messages
+ *    unwrapped on the wire.
+ * 4. CRDT & Tombstone synchronization: delegates conflict resolution to `crdt.js`
+ *    and exchanges tombstones during `fullSync` so deleted items never resurrect.
+ * 5. Clean room lifecycle (`joinRoom`, `leaveRoom`): allows users to leave a
+ *    foreign room and return to their own persisted board with one click.
+ * @module network
+ */
+
 import { Peer } from 'peerjs';
-import { state, peers, peerId, peerName, peerColor, persist, removeEl, setPersistKey, getRoomKey, setSelfPeerId, tombstones } from './state.js';
-import { uid, toast, deepCopy } from './utils.js';
+import {
+  state, peers, peerId, peerName, peerColor, persist, removeEl,
+  setPersistKey, getRoomKey, setSelfPeerId, tombstones,
+} from './state.js';
+import { uid, toast, deepCopy, BoundedSet } from './utils.js';
 import { requestRender, clearImageCache } from './renderer.js';
+import { beats, sanitizeElement, mergeConcurrentDragProps, applyLiveMoveGeometry } from './crdt.js';
+import { bus, EVENTS } from './events.js';
+
+export const NET_STATUS = Object.freeze({
+  CONNECTING: 'connecting',
+  ONLINE_SOLO: 'online_solo',
+  COLLABORATING: 'collaborating',
+  RECONNECTING: 'reconnecting',
+  OFFLINE: 'offline',
+});
 
 let peer = null;
 let myId = null;
-let _forceSaveId = false; // 用户选择"使用新房间号"后，下次 onPeerOpen 应写入 localStorage
+let _forceSaveId = false;
+let activeRoomId = null; // Non-null when user explicitly joined a foreign room
 const conns = {};
-const seen = new Set();
+const seen = new BoundedSet(4000);
 let lastCursor = 0;
 const _bcache = {};
-// 用户手动输入或链接进入的目标：只有这些目标失败才提示，网状互联的误报不打扰
 const manualTargets = new Set();
-// 未真正建立的连接超过这个时长就强制丢弃，兜底清理 peerjs 漏掉的残留条目
+
 const STALE_CONN_MS = 20000;
+const CHUNK_THRESHOLD = 48 * 1024; // 48 KB threshold for WebRTC DataChannel framing
+const CHUNK_SIZE = 32 * 1024;      // 32 KB per chunk
+const CHUNK_TTL_MS = 30000;
+const incomingChunks = new Map();  // chunkId -> { parts: string[], received: number, total: number, ts: number }
+
+// References to registered DOM/window listeners so repeated initNetwork() calls
+// (e.g. in test suites) replace rather than stack duplicate handlers.
+let _boundHashChange = null;
+let _boundBeforeUnload = null;
+let _boundConnectClick = null;
+let _boundRemoteKeydown = null;
+let _boundMyIdClick = null;
+let _boundShareClick = null;
+let _boundLeaveClick = null;
 
 function roomFromHash() {
-  const hash = window.location.hash.replace(/^#/, '');
+  const hash = (window.location.hash || '').replace(/^#/, '');
   const m = hash.match(/(?:room=)?([a-zA-Z0-9_-]+)/);
   return m ? m[1] : '';
 }
 
 /**
- * 摘掉一条连接并清掉所有关联状态。必须手写，原因是 peerjs 1.5.5 的两个坑叠加：
- *  1) 服务器判定目标不存在时发 EXPIRE，客户端只 `emitError('peer-unavailable')`，
- *     既不 `_connections.delete(peerId)` 也不 close 连接（对比 Leave 分支两件事都做）；
- *  2) `DataConnection.close()` 里有 `if (!this.open) return;`——没 open 过的连接
- *     调 close() 连 'close' 事件都不会触发。
- * 结果：连不上的目标会永久留在 conns 里，之后每次点「加入房间」都被
- * `if (conns[remoteId]) return` 静默拦下。这正是"输入房间号没反应/无法互联"的根因。
+ * Safely detach and close a connection, removing its entry from `conns` and `peers`.
+ * Handles PeerJS 1.5.x quirk where `close()` on a never-opened connection does
+ * not emit `'close'` and `peer-unavailable` does not clean up internal state.
+ * @param {string} id
  */
 function dropConn(id) {
   const c = conns[id];
   if (c) {
+    c._detached = true;
     try { c.close(); } catch (e) {}
     delete conns[id];
   }
@@ -46,26 +90,21 @@ function dropConn(id) {
 function pruneStaleConns() {
   const now = Date.now();
   for (const id in conns) {
-    if (!conns[id]._opened && now - (conns[id]._ts || now) > STALE_CONN_MS) dropConn(id);
+    if (!conns[id]._opened && now - (conns[id]._ts || now) > STALE_CONN_MS) {
+      dropConn(id);
+    }
   }
-}
-
-/**
- * 比较两个版本的元素谁更新。rev 是每元素自增计数器，本身不构成全序：两个端同时
- * 改同一元素会算出相同的 rev，严格 > 比较会丢掉第二条、谁赢取决于网络到达顺序，
- * 端间永久分叉（A 留下改法 1、C 留下改法 2）。用 (rev, cid) 打破平局——cid 是
- * PeerJS id，所有端都能算出同一个赢家，结果收敛。
- */
-function beats(a, cur) {
-  const ar = a.rev || 0, cr = cur.rev || 0;
-  if (ar !== cr) return ar > cr;
-  return String(a.cid || '') > String(cur.cid || '');
+  for (const [cid, entry] of incomingChunks.entries()) {
+    if (now - entry.ts > CHUNK_TTL_MS) {
+      incomingChunks.delete(cid);
+    }
+  }
 }
 
 /**
  * Connect to a remote peer ID
  * @param {string} remoteId
- * @param {boolean} manual 是否用户主动发起（决定失败时是否提示）
+ * @param {boolean} [manual=false] Whether initiated directly by user action
  */
 export function connectToPeer(remoteId, manual = false) {
   if (!remoteId || remoteId === myId) return;
@@ -73,20 +112,71 @@ export function connectToPeer(remoteId, manual = false) {
     toast('网络服务尚未就绪');
     return;
   }
-  // 残留的未建立连接要允许重连，否则一次失败就永久锁死这个房间号
-  if (conns[remoteId] && !conns[remoteId]._opened) dropConn(remoteId);
+  if (conns[remoteId] && !conns[remoteId]._opened) {
+    dropConn(remoteId);
+  }
   if (conns[remoteId]) return;
+
   let c = null;
-  try { c = peer.connect(remoteId, { reliable: true }); } catch (e) { return; }
-  if (!c) return;   // peerjs 在 disconnected 状态下 connect() 返回 undefined
-  if (manual) manualTargets.add(remoteId);
+  try {
+    c = peer.connect(remoteId, { reliable: true });
+  } catch (e) {
+    return;
+  }
+  if (!c) return;
+  if (manual) {
+    manualTargets.add(remoteId);
+    activeRoomId = remoteId;
+  }
   setupConn(c, true);
 }
 
 /**
- * 弹出模态框：原房间号被占用后让用户选择重试原号或使用新随机号。
- * 覆盖全屏、阻止点击穿透、只通过按钮关闭——避免用户无意间关掉而没做选择。
+ * Leave the current foreign room and restore the user's own local whiteboard
  */
+export function leaveRoom() {
+  for (const id of Object.keys(conns)) {
+    dropConn(id);
+  }
+  activeRoomId = null;
+  if (window.location.hash) {
+    window.location.hash = '';
+  }
+  const remoteInput = document.getElementById('remote-id');
+  if (remoteInput) remoteInput.value = '';
+
+  const myKey = 'wb-elements-v2:' + (myId || 'default');
+  setPersistKey(myKey);
+  try {
+    const raw = localStorage.getItem(myKey);
+    state.elements = raw ? (JSON.parse(raw) || {}) : {};
+  } catch (e) {
+    state.elements = {};
+  }
+  state.selectedId = null;
+  state.__mut++;
+  state.persistable = true;
+  persist();
+  updateNetUI();
+  updatePresence();
+  requestRender();
+  toast('已返回个人画布');
+}
+
+/**
+ * Return current network diagnostics / status snapshot
+ */
+export function getNetworkState() {
+  const openPeers = Object.keys(conns).filter(id => conns[id] && conns[id]._opened);
+  return {
+    myId,
+    activeRoomId,
+    connectedPeers: openPeers,
+    signalingOpen: Boolean(peer && peer.open),
+    persistable: state.persistable,
+  };
+}
+
 function showRoomConflictModal(oldId, onRetryOriginal, onUseNewRoom) {
   const existing = document.getElementById('room-conflict-modal');
   if (existing) existing.remove();
@@ -179,11 +269,11 @@ function showRoomConflictModal(oldId, onRetryOriginal, onUseNewRoom) {
   document.body.appendChild(overlay);
 }
 
-/** 弹出分享对话框：展示房间链接并提供复制按钮 */
 function showShareDialog(url) {
   const existing = document.getElementById('share-dialog');
   if (existing) existing.remove();
 
+  const targetRoom = activeRoomId || myId;
   const overlay = document.createElement('div');
   overlay.id = 'share-dialog';
   overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;';
@@ -193,14 +283,14 @@ function showShareDialog(url) {
 
   dialog.innerHTML = `
     <h3 style="margin:0 0 12px 0;font-size:16px;">分享房间链接</h3>
-    <p style="margin:0 0 12px 0;font-size:13px;color:#666;">复制链接发给好友，对方打开即可加入同屏。</p>
+    <p style="margin:0 0 12px 0;font-size:13px;color:#666;">复制链接发给好友，对方打开即可加入同屏协作。</p>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;">
       <input type="text" id="share-url-input" value="${url}" readonly 
         style="flex:1;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:12px;font-family:monospace;">
-      <button id="share-copy-btn" style="padding:8px 16px;background:#4f46e5;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;white-space:nowrap;">复制</button>
+      <button id="share-copy-btn" style="padding:8px 16px;background:#4f46e5;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;white-space:nowrap;">复制链接</button>
     </div>
     <div style="display:flex;gap:8px;">
-      <button id="share-copy-id-btn" style="padding:8px 16px;background:#f0f0f0;color:#333;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;">复制房间ID</button>
+      <button id="share-copy-id-btn" style="padding:8px 16px;background:#f0f0f0;color:#333;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;">复制房间ID (${targetRoom})</button>
       <button id="share-close-btn" style="padding:8px 16px;background:#f0f0f0;color:#333;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;margin-left:auto;">关闭</button>
     </div>
   `;
@@ -218,44 +308,42 @@ function showShareDialog(url) {
 
   document.getElementById('share-copy-id-btn').addEventListener('click', () => {
     if (navigator.clipboard) {
-      navigator.clipboard.writeText(myId).then(() => toast('已复制房间ID')).catch(() => toast(myId));
+      navigator.clipboard.writeText(targetRoom).then(() => toast('已复制房间ID')).catch(() => toast(targetRoom));
     } else {
-      toast(myId);
+      toast(targetRoom);
     }
   });
 
   document.getElementById('share-close-btn').addEventListener('click', () => overlay.remove());
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 }
 
-/**
- * 用给定 id 建一个 Peer 并挂好全部事件。id 为空则用随机号。
- * retries>0 时，房间号被占用会退避重试——立刻换随机号会让房间号凭空变掉，
- * 别人按旧链接进来就找不到，比等几秒糟糕得多。
- */
 function bootPeer(id, retries) {
   let p;
-  try { p = new Peer(id); } catch (e) { toast('无法创建网络连接'); return; }
+  try {
+    p = new Peer(id);
+  } catch (e) {
+    toast('无法创建网络连接');
+    return;
+  }
   peer = p;
 
-  p.on('open', id2 => onPeerOpen(id2, !!id));
+  p.on('open', id2 => onPeerOpen(id2, Boolean(id)));
 
   p.on('connection', conn => setupConn(conn, false));
 
   p.on('error', err => {
+    if (!err) return;
     if (err.type === 'peer-unavailable') {
-      // "Could not connect to peer <id>" 里带着目标 id，据此精确清理
       const m = String(err.message || '').match(/peer ([\w.-]+)/);
       const target = m ? m[1] : null;
       const isManual = target ? manualTargets.has(target) : manualTargets.size > 0;
-      if (target) dropConn(target); else pruneStaleConns();
+      if (target) dropConn(target);
+      else pruneStaleConns();
       if (isManual) toast('目标用户未在线或房间号不存在');
       return;
     }
     if (err.type === 'unavailable-id') {
-      // 已存房间号被占用：可能是本浏览器另一个标签页在用，也可能是上次没正常
-      // 退出留下的残留注册。先重试，等残留过期；都失败则弹窗让用户选择，
-      // 不静默切换——静默换号会让别人按旧链接进来找不到人。
       try { p.destroy(); } catch (e) {}
       if (retries > 0) {
         toast('房间号被占用，正在重试…');
@@ -273,33 +361,38 @@ function bootPeer(id, retries) {
     toast('网络提示: ' + err.type);
   });
 
-  p.on('disconnected', () => { if (peer === p && !p.destroyed) { try { p.reconnect(); } catch (e) {} } });
+  p.on('disconnected', () => {
+    if (peer === p && !p.destroyed) {
+      try { p.reconnect(); } catch (e) {}
+    }
+  });
   return p;
 }
 
-/** peer 上线后的统一收尾：登记 id、写本地缓存、按 URL 自动进房间 */
 function onPeerOpen(id, fromStorage) {
   myId = id;
   setSelfPeerId(id);
-  // 首次访问没有存储的 ID，也需写入 localStorage 以便刷新后复用同一房间号
   if (fromStorage || _forceSaveId || !localStorage.getItem('wb-peer-id')) {
     try { localStorage.setItem('wb-peer-id', id); } catch (e) {}
   }
   _forceSaveId = false;
-  // 没有显式房间时用自己的 id 作为缓存房间，让本地内容归到自己的房间名下
-  if (!roomFromHash()) setPersistKey('wb-elements-v2:' + id);
+
+  if (!roomFromHash()) {
+    setPersistKey('wb-elements-v2:' + id);
+  }
   const el = document.getElementById('my-id');
-  if (el) { el.textContent = '房间: ' + id; el.title = id; }
+  if (el) {
+    el.textContent = '房间: ' + id;
+    el.title = '点击复制我的房间ID: ' + id;
+  }
   updateNetUI();
   broadcast({ t: 'presence', name: peerName, color: peerColor });
   toast('已上线，可邀请好友同屏协作');
 
   const target = roomFromHash();
   if (target && target !== id) {
-    // 通过 URL room= 进别人的房间：画布完全在内存处理，绝不写 localStorage。
-    // 之后收到的 fullSync/upsert 只进 state.elements，persist() 因 persistable=false
-    // 自动落空，下次自己打开仍是自己的画布。
     state.persistable = false;
+    activeRoomId = target;
     joinRoomFromUrl(target);
   }
 }
@@ -312,32 +405,35 @@ function joinRoomFromUrl(targetRoomId) {
 }
 
 export function initNetwork() {
+  // Reset connection state cleanly on re-initialization
+  for (const id of Object.keys(conns)) {
+    delete conns[id];
+  }
+  manualTargets.clear();
+  incomingChunks.clear();
+  activeRoomId = null;
+
   let storedId;
-  try { storedId = localStorage.getItem('wb-peer-id') || undefined; } catch(e) { storedId = undefined; }
+  try { storedId = localStorage.getItem('wb-peer-id') || undefined; } catch (e) { storedId = undefined; }
   bootPeer(storedId, 3);
 
-  window.addEventListener('hashchange', () => {
+  if (_boundHashChange) window.removeEventListener('hashchange', _boundHashChange);
+  _boundHashChange = () => {
     const newRoom = roomFromHash();
-    // 自己的房间 = hash 为空，或 hash 指向自己的 PeerJS id
     const ownHash = !newRoom || newRoom === myId;
-    // 切到另一个房间：若还在自己的房间，先把画布存回自己的 key（在别人的房间里
-    // persistable 已是 false，persist() 自动不落盘），再清空画布。刻意不广播
-    // delete——那些元素不属于"我"，广播出去会让上一个房间的人跟着丢内容。
-    // 自己的房间号不触发（点"分享链接"复制的是我自己的 id，不算换房间）。
     if (newRoom && newRoom !== myId && newRoom !== getRoomKey()) {
       persist();
       state.persistable = false;
+      activeRoomId = newRoom;
       state.elements = {};
       state.selectedId = null;
-      state.__mut++; // 整幅替换：sortedIds / contentBounds 缓存必须失效
+      state.__mut++;
       const newKey = 'wb-elements-v2:' + newRoom;
       setPersistKey(newKey);
-      // 别人的房间内容只通过网络同步。不读该 key 的本地旧内容——即便是旧方案
-      // 残留的，也不是"我"的画布，读进来会显示成别人的旧画布。
+      updateNetUI();
       requestRender();
     } else if (ownHash && !state.persistable) {
-      // hash 清空（或指向自己）= 切回自己的房间：恢复可持久化，加载并写回自己
-      // 的画布。绝不把别人的元素写进 localStorage——只持久化自己的元素。
+      activeRoomId = null;
       const myKey = 'wb-elements-v2:' + (myId || 'default');
       setPersistKey(myKey);
       try {
@@ -347,22 +443,30 @@ export function initNetwork() {
         state.elements = {};
       }
       state.selectedId = null;
-      state.__mut++; // 整幅替换：sortedIds / contentBounds 缓存必须失效
+      state.__mut++;
       state.persistable = true;
       persist();
+      updateNetUI();
       requestRender();
     }
-    if (newRoom && newRoom !== myId && !conns[newRoom]) joinRoomFromUrl(newRoom);
-  });
-  
+    if (newRoom && newRoom !== myId && !conns[newRoom]) {
+      joinRoomFromUrl(newRoom);
+    }
+  };
+  window.addEventListener('hashchange', _boundHashChange);
+
   setInterval(() => {
-    if (peer && peer.open) broadcast({ t: 'presence', name: peerName, color: peerColor });
+    if (peer && peer.open) {
+      broadcast({ t: 'presence', name: peerName, color: peerColor });
+    }
   }, 4000);
-  
-  window.addEventListener('beforeunload', () => {
+
+  if (_boundBeforeUnload) window.removeEventListener('beforeunload', _boundBeforeUnload);
+  _boundBeforeUnload = () => {
     broadcast({ t: 'leave' });
     if (peer) try { peer.destroy(); } catch (e) {}
-  });
+  };
+  window.addEventListener('beforeunload', _boundBeforeUnload);
 
   setInterval(() => {
     const now = performance.now();
@@ -377,7 +481,6 @@ export function initNetwork() {
       updatePresence();
       requestRender();
     }
-    // 兜底清理 peerjs 漏掉的残留连接（见 dropConn 注释）
     pruneStaleConns();
   }, 5000);
 
@@ -390,81 +493,117 @@ export function initNetwork() {
     });
   }
 
-  // #copy-id 元素不存在，改由 #my-id 本身承担复制点击
   const myIdEl = document.getElementById('my-id');
   if (myIdEl) {
     myIdEl.style.cursor = 'pointer';
-    myIdEl.addEventListener('click', () => {
-      if (!myId) return;
+    if (_boundMyIdClick) myIdEl.removeEventListener('click', _boundMyIdClick);
+    _boundMyIdClick = () => {
+      const idToCopy = activeRoomId || myId;
+      if (!idToCopy) return;
       if (navigator.clipboard) {
-        navigator.clipboard.writeText(myId).then(() => toast('已复制房间ID')).catch(() => toast(myId));
+        navigator.clipboard.writeText(idToCopy).then(() => toast('已复制房间ID: ' + idToCopy)).catch(() => toast(idToCopy));
       } else {
-        toast(myId);
+        toast(idToCopy);
       }
-    });
+    };
+    myIdEl.addEventListener('click', _boundMyIdClick);
   }
 
-  // 复制多人同屏房间链接
   const shareBtn = document.getElementById('share-link-btn');
   if (shareBtn) {
-    shareBtn.addEventListener('click', () => {
-      if (!myId) { toast('请等待连接建立'); return; }
+    if (_boundShareClick) shareBtn.removeEventListener('click', _boundShareClick);
+    _boundShareClick = () => {
+      const targetRoom = activeRoomId || myId;
+      if (!targetRoom) { toast('请等待连接建立'); return; }
       const url = new URL(window.location.href);
-      url.hash = `room=${myId}`;
+      url.hash = `room=${targetRoom}`;
       showShareDialog(url.toString());
-    });
+    };
+    shareBtn.addEventListener('click', _boundShareClick);
   }
 
-  document.getElementById('connect-btn').addEventListener('click', () => {
-    const v = document.getElementById('remote-id').value.trim();
-    if (!v) return;
-    if (v === myId) { toast('不能连接自己'); return; }
-    if (conns[v] && conns[v]._opened) { toast('已连接'); return; }
-    // 手动输入 remoteId 加入 = 进入别人的房间：收到的画布只在内存处理，不写
-    // localStorage；否则下次自己打开看到的是别人的画布。
-    state.persistable = false;
-    connectToPeer(v, true);
-    toast('正在连接…');
-  });
-  document.getElementById('remote-id').addEventListener('keydown', e => {
-    if (e.key === 'Enter') document.getElementById('connect-btn').click();
-  });
+  const connectBtn = document.getElementById('connect-btn');
+  if (connectBtn) {
+    if (_boundConnectClick) connectBtn.removeEventListener('click', _boundConnectClick);
+    _boundConnectClick = () => {
+      const v = document.getElementById('remote-id').value.trim();
+      if (!v) return;
+      if (v === myId) { toast('不能连接自己'); return; }
+      if (conns[v] && conns[v]._opened) { toast('已连接'); return; }
+      persist();
+      state.persistable = false;
+      activeRoomId = v;
+      connectToPeer(v, true);
+      updateNetUI();
+      toast('正在连接…');
+    };
+    connectBtn.addEventListener('click', _boundConnectClick);
+  }
+
+  const leaveBtn = document.getElementById('leave-btn');
+  if (leaveBtn) {
+    if (_boundLeaveClick) leaveBtn.removeEventListener('click', _boundLeaveClick);
+    _boundLeaveClick = () => leaveRoom();
+    leaveBtn.addEventListener('click', _boundLeaveClick);
+  }
+
+  const remoteInput = document.getElementById('remote-id');
+  if (remoteInput) {
+    if (_boundRemoteKeydown) remoteInput.removeEventListener('keydown', _boundRemoteKeydown);
+    _boundRemoteKeydown = e => {
+      if (e.key === 'Enter') document.getElementById('connect-btn').click();
+    };
+    remoteInput.addEventListener('keydown', _boundRemoteKeydown);
+  }
 }
 
 function setupConn(conn, isInitiator = false) {
+  const prev = conns[conn.peer];
+  if (prev && prev !== conn) {
+    prev._detached = true;
+    if (!prev._opened) {
+      try { prev.close(); } catch (e) {}
+    }
+  }
+
   conns[conn.peer] = conn;
   conn._opened = false;
+  conn._detached = false;
   conn._ts = Date.now();
+
   conn.on('open', () => {
+    if (conn._detached) return;
     conn._opened = true;
     manualTargets.delete(conn.peer);
     updateNetUI();
-    // 告知新连接节点当前已知的其他节点列表，完成多人群组网状互联 (Full Mesh)
-    const existingPeers = Object.keys(conns).filter(p => p !== conn.peer);
+
+    const existingPeers = Object.keys(conns).filter(p => p !== conn.peer && conns[p]._opened);
     if (existingPeers.length > 0) {
-      try {
-        conn.send({ t: 'peer_list', list: existingPeers });
-      } catch (e) {}
+      sendOnConn(conn, { t: 'peer_list', list: existingPeers });
     }
 
     if (isInitiator) {
-      try {
-        conn.send({ t: 'request' });
-      } catch (e) {}
+      sendOnConn(conn, { t: 'request' });
     }
     broadcast({ t: 'presence', name: peerName, color: peerColor });
   });
+
   conn.on('data', m => {
-    if (!m) return;
+    if (!m || conn._detached) return;
+    if (m.t === 'chunk') {
+      handleChunk(m, conn);
+      return;
+    }
     if (m.mid) {
       if (seen.has(m.mid)) return;
       seen.add(m.mid);
-      if (seen.size > 3000) seen.clear();
     }
     handleMsg(m, conn);
     relay(m, conn.peer);
   });
+
   conn.on('close', () => {
+    if (conn._detached || (conns[conn.peer] && conns[conn.peer] !== conn)) return;
     delete conns[conn.peer];
     delete peers[conn.peer];
     manualTargets.delete(conn.peer);
@@ -472,15 +611,77 @@ function setupConn(conn, isInitiator = false) {
     updatePresence();
     requestRender();
   });
+
   conn.on('error', () => {
-    // 没建成就丢弃，别留成残留条目锁死这个房间号
+    if (conn._detached || (conns[conn.peer] && conns[conn.peer] !== conn)) return;
     if (!conn._opened) dropConn(conn.peer);
   });
 }
 
+function handleChunk(m, conn) {
+  const { chunkId, idx, total, data } = m;
+  if (!chunkId || typeof idx !== 'number' || typeof total !== 'number' || total <= 0 || total > 512) return;
+  let entry = incomingChunks.get(chunkId);
+  if (!entry) {
+    entry = { parts: new Array(total), received: 0, total, ts: Date.now() };
+    incomingChunks.set(chunkId, entry);
+  }
+  if (idx >= 0 && idx < total && entry.parts[idx] === undefined) {
+    entry.parts[idx] = data;
+    entry.received++;
+    entry.ts = Date.now();
+  }
+  if (entry.received === entry.total) {
+    incomingChunks.delete(chunkId);
+    try {
+      const fullMsg = JSON.parse(entry.parts.join(''));
+      if (fullMsg.mid) {
+        if (seen.has(fullMsg.mid)) return;
+        seen.add(fullMsg.mid);
+      }
+      handleMsg(fullMsg, conn);
+      relay(fullMsg, conn.peer);
+    } catch (e) {}
+  }
+}
+
+/**
+ * Send a message over a single DataConnection, automatically chunking if the
+ * serialized payload exceeds `CHUNK_THRESHOLD` (e.g. high-res base64 images).
+ * Normal messages are passed directly as plain objects so mocks and small
+ * messages incur zero serialization overhead.
+ */
+function sendOnConn(conn, msg) {
+  if (!conn || !conn.open) return;
+  try {
+    // Only check size when message potentially carries heavy image/state data
+    const mightBeLarge =
+      (msg.t === 'upsert' && msg.el && msg.el.type === 'image' && msg.el.dataUrl && msg.el.dataUrl.length > CHUNK_THRESHOLD) ||
+      (msg.t === 'state' && msg.elements && Object.keys(msg.elements).length > 25);
+
+    if (mightBeLarge) {
+      const raw = JSON.stringify(msg);
+      if (raw.length > CHUNK_THRESHOLD) {
+        const chunkId = uid();
+        const total = Math.ceil(raw.length / CHUNK_SIZE);
+        for (let i = 0; i < total; i++) {
+          conn.send({
+            t: 'chunk',
+            chunkId,
+            idx: i,
+            total,
+            data: raw.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
+          });
+        }
+        return;
+      }
+    }
+    conn.send(msg);
+  } catch (e) {}
+}
+
 export function broadcast(msg) {
   msg.from = peerId;
-  // 附带 PeerJS id：peers 表按 conn.peer 对齐，下线时才能精确清掉对应头像
   msg.pid = myId;
   sendLocal(msg);
 }
@@ -488,10 +689,9 @@ export function broadcast(msg) {
 function sendLocal(msg) {
   if (!msg.mid) msg.mid = uid();
   seen.add(msg.mid);
-  if (seen.size > 3000) seen.clear();
   for (const id in conns) {
     if (conns[id].open) {
-      try { conns[id].send(msg); } catch (e) {}
+      sendOnConn(conns[id], msg);
     }
   }
 }
@@ -499,70 +699,71 @@ function sendLocal(msg) {
 function relay(msg, exceptId) {
   for (const id in conns) {
     if (id !== exceptId && conns[id].open) {
-      try { conns[id].send(msg); } catch (e) {}
+      sendOnConn(conns[id], msg);
     }
   }
 }
 
 function handleMsg(m, conn) {
   if (m.t === 'upsert') {
-    const el = m.el;
-    if (!el || !el.id) return;
+    const el = sanitizeElement(m.el, m.pid);
+    if (!el) return;
     if (tombstones.has(el.id)) return;
-    el.cid = el.cid || m.pid || '';
     const cur = state.elements[el.id];
-    // 本地正在拖这个元素：只拒几何字段（避免拖一半被远程位置盖掉），非几何字段
-    // （文字/颜色/字号/透明度）照收——否则对方在拖拽期间改的文字我这边永远停在旧值，
-    // 松手后我广播的本地全量还会用旧文字盖掉对方的改动
+
+    // If local user is dragging this exact element, accept concurrent style/text
+    // updates while preserving local drag coordinates
     if (state.drag && state.drag.id === el.id) {
-      if (!el._isLiveMove && cur) {
-        let changed = false;
-        for (const k of ['text', 'color', 'fontSize', 'bgOpacity', 'textOpacity']) {
-          if (k in el && el[k] !== cur[k]) { cur[k] = el[k]; changed = true; }
-        }
-        if (changed) {
-          // 把 rev 抬到对方的版本：我松手后的最终 upsert 会算出 R+2 严格胜出，
-          // 否则我和对方都是 R+1 只能靠 cid 猜，猜输了我拖的位置就丢了
-          if ((el.rev || 0) > (cur.rev || 0)) cur.rev = el.rev;
-          persist();
-          requestRender();
-        }
+      if (mergeConcurrentDragProps(cur, el)) {
+        persist();
+        requestRender();
       }
       return;
     }
-    // 直播拖拽时 dataUrl 被剥离了，保留本地已有的
+
+    // Preserve local cached dataUrl when receiving a stripped live-move frame
     if (cur && cur.type === 'image' && cur.dataUrl && !el.dataUrl) {
       el.dataUrl = cur.dataUrl;
     }
+
     if (!cur || el._isLiveMove || beats(el, cur)) {
       if (el._isLiveMove && cur) {
-        // 直播拖拽只更新几何字段，保留非几何字段（文字/颜色/dataUrl）
-        if ((cur.rev || 0) > (el.rev || 0)) el.rev = cur.rev;
-        Object.assign(cur, { x: el.x, y: el.y, w: el.w, h: el.h, rotation: el.rotation, points: el.points });
+        applyLiveMoveGeometry(cur, el);
       } else {
-        // 新增元素或网络 upsert 覆盖：可能改变排序结果（包括对方 bringToFront
-        // 随 upsert 带过来的 z 变化），sortedIds / contentBounds 缓存必须失效。
         state.__mut++;
         state.elements[el.id] = el;
       }
       if (!el._isLiveMove) persist();
+      bus.emit(EVENTS.SELECTION_CHANGED, state.selectedId);
       requestRender();
     }
   } else if (m.t === 'delete') {
-    if (state.elements[m.id]) {
-      // removeEl 内部记 tombstone
-      clearThrottled(m.id);
-      removeEl(m.id, false);
+    if (m.id) {
+      tombstones.add(m.id);
+      if (state.elements[m.id]) {
+        clearThrottled(m.id);
+        removeEl(m.id, false);
+      }
     }
   } else if (m.t === 'state') {
+    if (Array.isArray(m.tombstones)) {
+      for (const tid of m.tombstones) {
+        if (typeof tid === 'string' && tid) {
+          tombstones.add(tid);
+          if (state.elements[tid]) {
+            if (state.elements[tid].type === 'image') clearImageCache(tid);
+            delete state.elements[tid];
+          }
+        }
+      }
+    }
     if (m.fullSync) {
-      // Preserve local drag position during fullSync to avoid position jumps
       const dragId = state.drag && state.drag.id;
       const dragPos = dragId && state.elements[dragId]
-        ? { x: state.elements[dragId].x, y: state.elements[dragId].y, rotation: state.elements[dragId].rotation } : null;
-      // Merge per-element with rev comparison; preserve newer local data
+        ? { x: state.elements[dragId].x, y: state.elements[dragId].y, rotation: state.elements[dragId].rotation }
+        : null;
       const incoming = m.elements || {};
-      // Clear caches for images being replaced
+
       for (const id in state.elements) {
         const cur = state.elements[id];
         const inc = incoming[id];
@@ -570,20 +771,15 @@ function handleMsg(m, conn) {
           clearImageCache(id);
         }
       }
-      // Apply incoming elements only if they have higher rev (or don't exist locally)
       for (const id in incoming) {
-        const el = incoming[id];
-        // 本地删过的元素永不复活——旧快照里还留着它们，不能因为收到快照就清 tombstone
         if (tombstones.has(id)) continue;
-        el.cid = el.cid || m.pid || '';
+        const el = sanitizeElement(incoming[id], m.pid);
+        if (!el) continue;
         const cur = state.elements[id];
         if (!cur || beats(el, cur)) {
           state.elements[id] = el;
         }
       }
-      // Remove elements that exist locally but not in sync AND are not locally newer
-      // (don't delete — a stale sync might just be missing them)
-      // Restore drag position if it was displaced by fullSync
       if (dragId && dragPos && state.elements[dragId]) {
         state.elements[dragId].x = dragPos.x;
         state.elements[dragId].y = dragPos.y;
@@ -591,47 +787,52 @@ function handleMsg(m, conn) {
       }
     } else {
       for (const id in m.elements) {
-        const el = m.elements[id];
         if (tombstones.has(id)) continue;
-        el.cid = el.cid || m.pid || '';
+        const el = sanitizeElement(m.elements[id], m.pid);
+        if (!el) continue;
         const cur = state.elements[id];
         if (!cur || beats(el, cur)) state.elements[id] = el;
       }
     }
-    // fullSync / 增量同步合并后整幅可能已经变化：sortedIds / contentBounds 缓存
-    // 必须失效（persist() 内部由 persistable 控制是否落盘，别人的画布不会写进
-    // localStorage）。
     state.__mut++;
     persist();
     requestRender();
   } else if (m.t === 'request') {
+    const syncPayload = {
+      t: 'state',
+      elements: state.elements,
+      tombstones: Array.from(tombstones),
+      fullSync: true,
+    };
     if (conn && conn.open) {
-      try {
-        conn.send({ t: 'state', elements: state.elements, fullSync: true });
-      } catch (e) {}
+      sendOnConn(conn, syncPayload);
     } else {
-      broadcast({ t: 'state', elements: state.elements, fullSync: true });
+      broadcast(syncPayload);
     }
   } else if (m.t === 'cursor') {
-    // 用 pid（PeerJS id）做键，与 conn.peer 对齐，掉线时 dropConn 才能精确清掉
     const who = m.pid || m.from;
+    if (!who) return;
     peers[who] = { name: m.name, color: m.color, cursor: { x: m.x, y: m.y }, last: performance.now() };
     updatePresence();
     requestRender();
   } else if (m.t === 'presence') {
     const who = m.pid || m.from;
+    if (!who) return;
     if (!peers[who]) peers[who] = { name: m.name, color: m.color, last: performance.now() };
-    else { peers[who].name = m.name; peers[who].color = m.color; peers[who].last = performance.now(); }
+    else {
+      peers[who].name = m.name;
+      peers[who].color = m.color;
+      peers[who].last = performance.now();
+    }
     updatePresence();
   } else if (m.t === 'leave') {
     delete peers[m.pid || m.from];
     updatePresence();
     requestRender();
   } else if (m.t === 'peer_list' && Array.isArray(m.list)) {
-    // 自动连接房间内其它在线同屏成员，实现全网状拓扑
     m.list.forEach(otherPeerId => {
       if (otherPeerId && otherPeerId !== myId && !conns[otherPeerId]) {
-        connectToPeer(otherPeerId);
+        connectToPeer(otherPeerId, false);
       }
     });
   }
@@ -644,10 +845,6 @@ export function broadcastCursor(wp) {
   broadcast({ t: 'cursor', name: peerName, color: peerColor, x: wp.x, y: wp.y });
 }
 
-/**
- * Clear pending throttled timer for an element (e.g. on pointerup)
- * @param {string} id
- */
 export function clearThrottled(id) {
   const c = _bcache[id];
   if (c) {
@@ -656,10 +853,6 @@ export function clearThrottled(id) {
   }
 }
 
-/**
- * Throttled broadcast for real-time live drag / draw updates
- * @param {Object} el
- */
 export function broadcastThrottled(el) {
   if (!el || !el.id) return;
   const now = performance.now();
@@ -668,7 +861,6 @@ export function broadcastThrottled(el) {
     _bcache[el.id] = c = { lastTime: 0, timer: null, payload: null };
   }
 
-  // Strip heavy image base64 dataUrl during real-time movement frames
   let payload;
   if (el.type === 'image' && el.dataUrl) {
     payload = { ...el };
@@ -680,7 +872,7 @@ export function broadcastThrottled(el) {
   }
   c.payload = payload;
 
-  const interval = 25; // ~40 fps ultra-responsive
+  const interval = 25;
   const elapsed = now - c.lastTime;
 
   if (elapsed >= interval) {
@@ -707,11 +899,17 @@ function updateNetUI() {
   const n = Object.keys(conns).length;
   const el = document.getElementById('net-count');
   if (el) el.textContent = n ? (`同屏中: ${n + 1}人`) : '单人模式';
+
+  const leaveBtn = document.getElementById('leave-btn');
+  if (leaveBtn) {
+    leaveBtn.style.display = (!state.persistable || activeRoomId) ? '' : 'none';
+  }
+  bus.emit(EVENTS.NET_STATUS, { peers: n, persistable: state.persistable, activeRoomId });
 }
 
 export function updatePresence() {
   const box = document.getElementById('avatars');
-  // peers 的键是 PeerJS id，自己要用 myId 过滤，不能用本地随机的 peerId
+  if (!box) return;
   const ids = Object.keys(peers).filter(id => id !== myId);
   const all = [{ id: peerId, name: peerName, color: peerColor, self: true }, ...ids.map(id => ({ id, ...peers[id] }))];
   box.innerHTML = '';
@@ -723,5 +921,7 @@ export function updatePresence() {
     d.textContent = p.name.slice(-2);
     box.appendChild(d);
   });
-  document.getElementById('online-count').textContent = all.length + ' 人在线';
+  const countEl = document.getElementById('online-count');
+  if (countEl) countEl.textContent = all.length + ' 人在线';
+  bus.emit(EVENTS.PRESENCE_CHANGED, all);
 }

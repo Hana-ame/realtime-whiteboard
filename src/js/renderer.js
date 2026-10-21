@@ -5,10 +5,11 @@
 
 import { state, peers, peerId, selfPeerId } from './state.js';
 import { screenToWorld, worldToScreen } from './utils.js';
-import { connEndpoints, noteHandles, contentBounds } from './interaction.js';
+import { connEndpoints, noteHandles, contentBounds } from './geometry.js';
 import { decodeGifFrames } from './gif.js';
+import { bus, EVENTS } from './events.js';
 
-export const DPR = Math.max(1, window.devicePixelRatio || 1);
+export const DPR = Math.max(1, (typeof window !== 'undefined' && window.devicePixelRatio) || 1);
 export const GRID = 40;
 
 let canvas, ctx, mm, mmx, stage;
@@ -17,12 +18,7 @@ let renderQueued = false;
 // Image element cache: id -> HTMLImageElement
 const imageCache = {};
 
-// ── Lazy image src assignment ──────────────────────────────────────────────
-// Setting `img.src` to a multi-MB base64 dataUrl forces the browser to parse
-// the whole string synchronously; doing N of them in one render pass blocks the
-// main thread (the "first screen frozen while images show placeholders"
-// symptom). Instead we queue the assignment and pump the queue in small time
-// slices (≤4ms per tick) so the UI stays responsive while placeholders spin.
+// Lazy image src assignment queue so multi-MB base64 strings don't freeze first paint
 const imageQueue = [];
 let imagePumpTimer = null;
 
@@ -47,14 +43,6 @@ function unqueueImage(id) {
   }
 }
 
-// Images currently loading — used to drive the placeholder spinner animation.
-// A non-empty set means requestRender() must fire periodically so the spinner
-// arc rotates. Cleared on img.onload / img.onerror.
-//
-// The loop is throttled to SPINNER_FRAME_MS (~15fps): a 1 rotation/second arc
-// looks identical at 15fps, but re-rendering the WHOLE scene at 60fps while N
-// images load is the main first-screen blocker (each render re-sorts all ids,
-// rebuilds the grid pattern and re-computes minimap bounds).
 let imageLoadRafId = null;
 let lastSpinnerFrame = 0;
 const SPINNER_FRAME_MS = 66;
@@ -77,20 +65,13 @@ function stopImageLoadAnim() {
   if (imageLoadRafId) { cancelAnimationFrame(imageLoadRafId); imageLoadRafId = null; }
 }
 
-// Cached grid tile (offscreen canvas + bucket key from view scale)
 let gridTile = null;
 let gridTileBucket = -1;
-// Pattern built from the tile — cached so we don't createPattern every frame.
 let gridPattern = null;
 
-// Cached stroke bounding boxes: id -> { bbox, points, len }
 const strokeBboxCache = new Map();
-
-// Cached contentBounds result
 let boundsCache = null;
 
-// GIF animation state: id -> { width, height, frames: Uint8ClampedArray[],
-//   durations: number[], frameIndex, elapsed, pending, frameCanvas, frameCtx }
 const gifState = {};
 let gifAnimRunning = false;
 let gifRafId = null;
@@ -106,16 +87,12 @@ function startGifAnim() {
     let changed = false;
     for (const id in gifState) {
       const gs = gifState[id];
-      // Clean up gifState entry if element was removed (undo/redo/room switch)
       if (!state.elements[id]) {
         delete gifState[id];
         if (!hasAnyGif()) stopGifAnim();
         continue;
       }
-      if (!gs.frames || !gs.frames.length) continue;
-      // Skip single-frame GIFs — wrapping modulo 1 wastes CPU
-      if (gs.frames.length <= 1) continue;
-      // Cap elapsed at 2s to prevent runaway iterations after tab backgrounded
+      if (!gs.frames || gs.frames.length <= 1) continue;
       gs.elapsed = Math.min(gs.elapsed + dt, 2000);
       while (gs.elapsed >= (gs.durations[gs.frameIndex] || 100)) {
         gs.elapsed -= (gs.durations[gs.frameIndex] || 100);
@@ -138,24 +115,15 @@ function hasAnyGif() {
   return Object.keys(gifState).length > 0;
 }
 
-/**
- * Get or create a cached HTMLImageElement for an image element
- * @param {Object} el - Image element with dataUrl
- * @returns {HTMLImageElement}
- */
 function getImageObj(el) {
   const cached = imageCache[el.id];
   if (cached && cached._dataUrl === el.dataUrl) return cached;
 
-  // GIF: trigger async frame decoding via pure-JS decoder
   if (el.dataUrl && el.dataUrl.startsWith('data:image/gif') && !gifState[el.id]) {
     gifState[el.id] = { frames: null, durations: null, frameIndex: 0, elapsed: 0, pending: true };
     decodeGifFrames(el.dataUrl).then(result => {
       const gs = gifState[el.id];
-      if (!gs) return; // element was removed during decode
-      // decodeGifFrames returns null for non-GIF / malformed / zero-frame data.
-      // Without this guard the next line dereferences null → TypeError → unhandled
-      // rejection, leaving gifState stuck with frames:null forever (static 1st frame).
+      if (!gs) return;
       gs.pending = false;
       if (!result) return;
       gs.width = result.width;
@@ -163,7 +131,6 @@ function getImageObj(el) {
       gs.frames = result.frames;
       gs.durations = result.durations;
       if (result.frames.length) {
-        // Create a per-frame canvas for putImageData (cached, reused across renders)
         gs.frameCanvas = document.createElement('canvas');
         gs.frameCanvas.width = result.width;
         gs.frameCanvas.height = result.height;
@@ -177,10 +144,6 @@ function getImageObj(el) {
     });
   }
 
-  // 换图（同一 id 换了 dataUrl）时丢弃队列里同 id 的旧 Image：它已被下面
-  // imageCache[el.id] 覆盖、永远不会被绘制，却仍会白解析一次几 MB 的 base64；
-  // 更糟的是旧 Image 的 onload 会执行 loadingImages.delete(el.id)，把新图
-  // "仍在加载"的标记一并抹掉，导致转圈动画提前停止。
   unqueueImage(el.id);
 
   const img = new Image();
@@ -200,14 +163,10 @@ function getImageObj(el) {
   imageCache[el.id] = img;
   loadingImages.add(el.id);
   startImageLoadAnim();
-  queueImageSrc(img); // was: img.src = el.dataUrl;  — see lazy-loading note above
+  queueImageSrc(img);
   return img;
 }
 
-/**
- * Remove cached image when element is deleted
- * @param {string} id - Element id
- */
 export function clearImageCache(id) {
   delete imageCache[id];
   loadingImages.delete(id);
@@ -225,9 +184,15 @@ export function initRenderer() {
   stage = document.getElementById('stage');
   mm = document.getElementById('mm');
   mmx = mm.getContext('2d');
+
+  bus.off(EVENTS.RENDER_REQUEST, requestRender);
+  bus.on(EVENTS.RENDER_REQUEST, requestRender);
+  bus.off(EVENTS.IMAGE_CACHE_CLEAR, clearImageCache);
+  bus.on(EVENTS.IMAGE_CACHE_CLEAR, clearImageCache);
 }
 
 export function resize() {
+  if (!stage || !canvas || !ctx || !mm || !mmx) return;
   const newW = stage.clientWidth;
   const newH = stage.clientHeight;
   if (newW === state.W && newH === state.H) return;
@@ -248,14 +213,12 @@ export function requestRender() {
   renderQueued = true;
   requestAnimationFrame(() => {
     renderQueued = false;
+    if (!ctx || !mmx) return;
     render();
     drawMinimap();
   });
 }
 
-// Compute or return a cached bounding box for a stroke element.
-// Invalidation: entries are discarded when the points array reference or its
-// length changes (covers both "array replaced" and "push'd to in place").
 function getStrokeBBox(el) {
   const cached = strokeBboxCache.get(el.id);
   if (cached && cached.points === el.points && cached.len === el.points.length) {
@@ -274,8 +237,6 @@ function getStrokeBBox(el) {
   return bbox;
 }
 
-// True if `el`'s bounding box does not intersect the (already margin-expanded)
-// visible world rect. Connections are handled by their endpoints.
 function isCulled(el, vr) {
   if (!el) return true;
   if (el.type === 'note' || el.type === 'image') {
@@ -292,6 +253,7 @@ function isCulled(el, vr) {
     return x1 < vr.x0 || x0 > vr.x1 || y1 < vr.y0 || y0 > vr.y1;
   }
   if (el.type === 'stroke') {
+    if (!el.points || !el.points.length) return true;
     const bb = getStrokeBBox(el);
     return bb.x1 < vr.x0 || bb.x0 > vr.x1 ||
            bb.y1 < vr.y0 || bb.y0 > vr.y1;
@@ -299,13 +261,6 @@ function isCulled(el, vr) {
   return false;
 }
 
-// Ids sorted by (el.z || 0) ascending, preserving insertion order for equal z.
-// Uses a [id, originalIndex, z] tuple so the result is well-defined regardless
-// of the host engine's sort stability.
-//
-// Cached on state.__mut: the order only changes when elements are added,
-// removed or re-z'd, so re-sorting on every frame while images load (spinner
-// loop) is pure waste. __mut is bumped by every mutation in state.js/network.js.
 let sortedIdsCache = null;
 let sortedIdsMut = -1;
 function getSortedIds() {
@@ -334,7 +289,6 @@ function render() {
   ctx.scale(state.view.scale, state.view.scale);
   drawGrid();
 
-  // Visible world rect, expanded by ~120 device px for shadows/margins.
   const m = 120 / state.view.scale;
   const vr = {
     x0: -state.view.x / state.view.scale - m,
@@ -346,37 +300,38 @@ function render() {
 
   for (const id of ids) {
     const el = state.elements[id];
-    if (el.type !== 'connection') continue;
+    if (!el || el.type !== 'connection') continue;
     const fromEl = state.elements[el.from];
     const toEl = state.elements[el.to];
     if (!fromEl || !toEl) continue;
-    if (isCulled(fromEl, vr) || isCulled(toEl, vr)) continue;
+    if (isCulled(fromEl, vr) && isCulled(toEl, vr)) continue;
     drawConnection(el);
   }
   for (const id of ids) {
     const el = state.elements[id];
-    if (el.type !== 'stroke') continue;
+    if (!el || el.type !== 'stroke') continue;
     if (isCulled(el, vr)) continue;
     drawStroke(el);
   }
   for (const id of ids) {
     const el = state.elements[id];
-    if (el.type !== 'image') continue;
+    if (!el || el.type !== 'image') continue;
     if (isCulled(el, vr)) continue;
     drawImageEl(el);
   }
   for (const id of ids) {
     const el = state.elements[id];
-    if (el.type !== 'note') continue;
+    if (!el || el.type !== 'note') continue;
     if (isCulled(el, vr)) continue;
     drawNote(el);
   }
 
-  if (state.tool === 'connect' && state.connectFrom && state.drag && state.drag.mode === 'connect') {
+  // Draw active connection preview line (both during drag and two-click connect mode)
+  if (state.tool === 'connect' && state.connectFrom) {
     const a = state.elements[state.connectFrom];
     if (a) {
       const c = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
-      ctx.strokeStyle = '#4c8bf5';
+      ctx.strokeStyle = state.connColor || '#4c8bf5';
       ctx.lineWidth = 2 / state.view.scale;
       ctx.setLineDash([6 / state.view.scale, 5 / state.view.scale]);
       ctx.beginPath();
@@ -389,16 +344,12 @@ function render() {
   ctx.restore();
 
   const sel = state.selectedId && state.elements[state.selectedId];
-  if (sel && (sel.type === 'note' || sel.type === 'image')) {
+  if (sel) {
     drawSelection(sel);
   }
   drawPeerCursors();
 }
 
-// Cached grid tile: a single offscreen canvas containing one 5*GRID x 5*GRID
-// tile with the minor/major line pattern, rendered at the current view scale
-// so lines stay 1 device-pixel wide.  Bucketed by scale so we only rebuild
-// when zoom crosses a small threshold.
 function getGridTile() {
   const scale = state.view.scale;
   const bucket = Math.round(scale * 8);
@@ -411,7 +362,6 @@ function getGridTile() {
   const g = c.getContext('2d');
   const step = px / 5;
 
-  // Minor lines: interior verticals/horizontals at 1..4 grid units.
   g.strokeStyle = '#eef0f4';
   g.lineWidth = 1;
   g.beginPath();
@@ -422,8 +372,6 @@ function getGridTile() {
   }
   g.stroke();
 
-  // Major lines: tile edges (0 and px wrap to the same world coordinate when
-  // tiled, so drawing both gives a full 1px line at every 5*GRID boundary).
   g.strokeStyle = '#e3e6ee';
   g.beginPath();
   g.moveTo(0, 0); g.lineTo(0, px);
@@ -434,7 +382,7 @@ function getGridTile() {
 
   gridTile = c;
   gridTileBucket = bucket;
-  gridPattern = null; // tile replaced → pattern must be rebuilt
+  gridPattern = null;
   return c;
 }
 
@@ -449,8 +397,6 @@ function drawGrid() {
   ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
 }
 
-// Apply an element's rotation about its centre to the current ctx. Callers
-// must wrap this in ctx.save()/ctx.restore().
 function applyElRotation(el) {
   if (!el.rotation) return;
   const cx = el.x + el.w / 2, cy = el.y + el.h / 2;
@@ -474,8 +420,8 @@ function roundRect(c, x, y, w, h, r) {
 
 function drawSpinner(cx, cy, size) {
   const time = performance.now() / 1000;
-  const startAngle = (time * 2 * Math.PI) % (2 * Math.PI); // 1 rotation per second
-  const endAngle = startAngle + Math.PI * 1.5; // 270 degree arc
+  const startAngle = (time * 2 * Math.PI) % (2 * Math.PI);
+  const endAngle = startAngle + Math.PI * 1.5;
 
   ctx.save();
   ctx.strokeStyle = '#4f46e5';
@@ -489,13 +435,10 @@ function drawSpinner(cx, cy, size) {
 
 function drawImagePlaceholder(el, img) {
   ctx.save();
-
-  // Light background fill
   ctx.fillStyle = 'rgba(245,245,245,0.8)';
   roundRect(ctx, el.x, el.y, el.w, el.h, 6);
   ctx.fill();
 
-  // Dashed border
   ctx.setLineDash([6 / state.view.scale, 4 / state.view.scale]);
   ctx.strokeStyle = '#bbb';
   ctx.lineWidth = 1.5 / state.view.scale;
@@ -503,13 +446,11 @@ function drawImagePlaceholder(el, img) {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Center position
   const cx = el.x + el.w / 2;
   const cy = el.y + el.h / 2;
   const size = Math.max(8, Math.min(el.w, el.h) * 0.12);
 
   if (img && img.error) {
-    // Error state: red X icon + label
     ctx.fillStyle = '#e74c3c';
     ctx.font = `bold ${Math.max(14, size * 2)}px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif`;
     ctx.textAlign = 'center';
@@ -518,7 +459,6 @@ function drawImagePlaceholder(el, img) {
     ctx.font = `${Math.max(10, size)}px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif`;
     ctx.fillText('加载失败', cx, cy + size * 1.6);
   } else {
-    // Loading state: animated spinner
     drawSpinner(cx, cy, size);
   }
 
@@ -530,13 +470,8 @@ function drawImageEl(el) {
   applyElRotation(el);
 
   let drawSource;
-
-  // GIF with decoded frames: render current animation frame via putImageData
   const gs = gifState[el.id];
   if (el.dataUrl && el.dataUrl.startsWith('data:image/gif') && gs && gs.frames && gs.frames.length) {
-    // putImageData ignores ctx transforms (scale/rotate), so we draw the RGBA
-    // buffer to an offscreen canvas first, then use drawImage (which honours
-    // the transform) to blit it into place.
     const fc = gs.frameCanvas;
     const fx = gs.frameCtx;
     if (fc && fx) {
@@ -547,7 +482,6 @@ function drawImageEl(el) {
       drawSource = getImageObj(el);
     }
   } else {
-    // Static image or GIF fallback (first frame via HTMLImageElement)
     drawSource = getImageObj(el);
     if (!drawSource.complete || !drawSource.naturalWidth) {
       drawImagePlaceholder(el, drawSource);
@@ -565,7 +499,6 @@ function drawImageEl(el) {
   ctx.drawImage(drawSource, el.x, el.y, el.w, el.h);
   ctx.restore();
 
-  // Subtle border
   ctx.save();
   ctx.strokeStyle = 'rgba(0,0,0,.10)';
   ctx.lineWidth = 1.5 / state.view.scale;
@@ -588,7 +521,14 @@ function drawNote(n) {
   ctx.fillStyle = n.color;
   ctx.fill();
   ctx.restore();
-  
+
+  // Skip canvas text when the note is actively being edited in the overlaid <textarea>
+  // to prevent double-text ghosting while preserving background opacity and shadow.
+  if (state.editingId === n.id) {
+    ctx.restore();
+    return;
+  }
+
   ctx.save();
   ctx.globalAlpha = (n.textOpacity ?? 72) / 100;
   ctx.fillStyle = '#1c1f2b';
@@ -626,7 +566,7 @@ function wrapText(text, maxW) {
 }
 
 function drawStroke(s) {
-  if (s.points.length < 1) return;
+  if (!s.points || s.points.length < 1) return;
   ctx.strokeStyle = s.color;
   ctx.lineWidth = s.width;
   ctx.lineCap = 'round';
@@ -653,7 +593,7 @@ function drawConnection(c) {
   ctx.moveTo(e.a.x, e.a.y);
   ctx.lineTo(e.b.x, e.b.y);
   ctx.stroke();
-  
+
   const ang = Math.atan2(e.b.y - e.a.y, e.b.x - e.a.x);
   const ah = 10 / state.view.scale;
   ctx.fillStyle = col;
@@ -665,58 +605,94 @@ function drawConnection(c) {
   ctx.fill();
 }
 
-function drawSelection(n) {
-  const { pts, sz, rotScreen, rotCx } = noteHandles(n);
-  ctx.strokeStyle = '#4c8bf5';
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([]);
+function drawSelection(sel) {
+  if (sel.type === 'note' || sel.type === 'image') {
+    const { pts, sz, rotScreen, rotCx } = noteHandles(sel);
+    ctx.strokeStyle = '#4c8bf5';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([]);
 
-  // Rotated selection frame (follows the element's angle).
-  ctx.beginPath();
-  ctx.moveTo(pts.nw.x, pts.nw.y);
-  ctx.lineTo(pts.ne.x, pts.ne.y);
-  ctx.lineTo(pts.se.x, pts.se.y);
-  ctx.lineTo(pts.sw.x, pts.sw.y);
-  ctx.closePath();
-  ctx.stroke();
-
-  // Rotation handle: line from the knob to the element centre + the knob.
-  ctx.save();
-  ctx.strokeStyle = 'rgba(76,139,245,.55)';
-  ctx.beginPath();
-  ctx.moveTo(rotCx.x, rotCx.y);
-  ctx.lineTo(rotScreen.x, rotScreen.y);
-  ctx.stroke();
-  ctx.restore();
-
-  // 8 resize handles (4 corners = proportional, 4 edge midpoints = free).
-  const half = sz / 2;
-  ctx.fillStyle = '#fff';
-  for (const k in pts) {
     ctx.beginPath();
-    ctx.rect(pts[k].x - half, pts[k].y - half, sz, sz);
+    ctx.moveTo(pts.nw.x, pts.nw.y);
+    ctx.lineTo(pts.ne.x, pts.ne.y);
+    ctx.lineTo(pts.se.x, pts.se.y);
+    ctx.lineTo(pts.sw.x, pts.sw.y);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(76,139,245,.55)';
+    ctx.beginPath();
+    ctx.moveTo(rotCx.x, rotCx.y);
+    ctx.lineTo(rotScreen.x, rotScreen.y);
+    ctx.stroke();
+    ctx.restore();
+
+    const half = sz / 2;
+    ctx.fillStyle = '#fff';
+    for (const k in pts) {
+      ctx.beginPath();
+      ctx.rect(pts[k].x - half, pts[k].y - half, sz, sz);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    ctx.beginPath();
+    ctx.arc(rotScreen.x, rotScreen.y, half + 1, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
+
+    const drag = state.drag;
+    if (drag && drag.mode === 'rotate' && drag.id === sel.id && drag.angle != null) {
+      const label = Math.round(drag.angle * 180 / Math.PI) + '°';
+      ctx.save();
+      ctx.font = '12px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(31,35,48,.92)';
+      ctx.fillRect(rotScreen.x + 10, rotScreen.y - 24, tw + 14, 20);
+      ctx.fillStyle = '#fff';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, rotScreen.x + 17, rotScreen.y - 13);
+      ctx.restore();
+    }
+    return;
   }
 
-  // Rotation knob (round, outside the frame).
-  ctx.beginPath();
-  ctx.arc(rotScreen.x, rotScreen.y, half + 1, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-
-  // Live angle readout while dragging the rotation handle.
-  const drag = state.drag;
-  if (drag && drag.mode === 'rotate' && drag.id === n.id && drag.angle != null) {
-    const label = Math.round(drag.angle * 180 / Math.PI) + '°';
+  if (sel.type === 'stroke' && sel.points && sel.points.length) {
+    const bb = getStrokeBBox(sel);
+    const tl = worldToScreen(bb.x0, bb.y0, state.view);
+    const br = worldToScreen(bb.x1, bb.y1, state.view);
+    const pad = 6;
     ctx.save();
-    ctx.font = '12px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
-    const tw = ctx.measureText(label).width;
-    ctx.fillStyle = 'rgba(31,35,48,.92)';
-    ctx.fillRect(rotScreen.x + 10, rotScreen.y - 24, tw + 14, 20);
+    ctx.strokeStyle = '#4c8bf5';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.strokeRect(tl.x - pad, tl.y - pad, (br.x - tl.x) + pad * 2, (br.y - tl.y) + pad * 2);
+    ctx.restore();
+    return;
+  }
+
+  if (sel.type === 'connection') {
+    const e = connEndpoints(sel);
+    if (!e) return;
+    const sa = worldToScreen(e.a.x, e.a.y, state.view);
+    const sb = worldToScreen(e.b.x, e.b.y, state.view);
+    ctx.save();
+    ctx.strokeStyle = '#4c8bf5';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(sa.x, sa.y);
+    ctx.lineTo(sb.x, sb.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
     ctx.fillStyle = '#fff';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(label, rotScreen.x + 17, rotScreen.y - 13);
+    for (const pt of [sa, sb]) {
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
     ctx.restore();
   }
 }
@@ -724,13 +700,12 @@ function drawSelection(n) {
 function drawPeerCursors() {
   const now = performance.now();
   for (const id in peers) {
-    // peers 的键是 PeerJS id，自己要用 selfPeerId 过滤（peerId 是本地随机的，留着兼容旧条目）
     if (id === peerId || id === selfPeerId) continue;
     const p = peers[id];
     if (!p.cursor || now - p.last > 12000) continue;
     const s = worldToScreen(p.cursor.x, p.cursor.y, state.view);
     if (s.x < -40 || s.y < -40 || s.x > state.W + 40 || s.y > state.H + 40) continue;
-    
+
     ctx.save();
     ctx.fillStyle = p.color;
     ctx.beginPath();
@@ -740,7 +715,7 @@ function drawPeerCursors() {
     ctx.lineTo(s.x + 11, s.y + 11);
     ctx.closePath();
     ctx.fill();
-    
+
     ctx.font = '11px sans-serif';
     const tw = ctx.measureText(p.name).width;
     ctx.fillStyle = p.color;
@@ -751,13 +726,6 @@ function drawPeerCursors() {
   }
 }
 
-// Cheap fingerprint cache for contentBounds().  The key is the mutation counter
-// state.__mut: contentBounds() only changes when elements are added/removed
-// (structural) or their geometry/text is committed (upsert/undo/redo), all of
-// which bump __mut. Live drags mutate positions in place without bumping __mut,
-// so the minimap may lag slightly during a drag and correct itself at
-// pointerup — the same behavior as the old rev-sum fingerprint, but O(1) to
-// check instead of O(n log n) string building every frame.
 function getCachedContentBounds() {
   const mut = state.__mut || 0;
   if (boundsCache && boundsCache.mut === mut) return boundsCache.result;
@@ -773,7 +741,7 @@ function drawMinimap() {
   mmx.clearRect(0, 0, mw, mh);
   mmx.fillStyle = '#fbfcfe';
   mmx.fillRect(0, 0, mw, mh);
-  
+
   const cb = getCachedContentBounds();
   const vx0 = screenToWorld(0, 0, state.view);
   const vx1 = screenToWorld(state.W, state.H, state.view);
@@ -781,7 +749,7 @@ function drawMinimap() {
     minX: Math.min(cb.minX, vx0.x) - 40,
     minY: Math.min(cb.minY, vx0.y) - 40,
     maxX: Math.max(cb.maxX, vx1.x) + 40,
-    maxY: Math.max(cb.maxY, vx1.y) + 40
+    maxY: Math.max(cb.maxY, vx1.y) + 40,
   };
   const cw = Math.max(10, b.maxX - b.minX);
   const ch = Math.max(10, b.maxY - b.minY);
@@ -790,10 +758,9 @@ function drawMinimap() {
   const oy = (mh - ch * sc) / 2;
   const tx = wx => ox + (wx - b.minX) * sc;
   const ty = wy => oy + (wy - b.minY) * sc;
-  
+
   mm._map = { b, sc, ox, oy };
-  
-  // Draw a rect for note/image, honouring rotation about the element centre.
+
   const mmRect = (el, fill) => {
     mmx.fillStyle = fill;
     if (el.rotation) {
@@ -810,11 +777,12 @@ function drawMinimap() {
 
   for (const id in state.elements) {
     const el = state.elements[id];
+    if (!el) continue;
     if (el.type === 'note') {
       mmRect(el, el.color);
     } else if (el.type === 'image') {
       mmRect(el, '#c8cdd8');
-    } else if (el.type === 'stroke') {
+    } else if (el.type === 'stroke' && el.points) {
       mmx.strokeStyle = el.color;
       mmx.lineWidth = 1;
       mmx.beginPath();

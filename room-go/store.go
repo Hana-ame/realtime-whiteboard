@@ -5,18 +5,23 @@ import (
 	"sync"
 )
 
-// store 是房间侧的白板快照：一份按 rev 合并的元素副本。
+// store 是房间侧的白板快照：一份按 (rev, cid) 合并的元素副本，并带有版本化删除墓碑（tombstones）。
 //
 // 它存在的意义是让房间"独立于浏览器存活"：所有成员离线时画布内容不丢，
-// 下一个成员加入就能立刻看到完整内容，而不必等某个在线的老成员在线同步。
-// 写入端（浏览器）仍然是权威的，store 只是被动镜像。
+// 下一个成员加入就能立刻看到完整内容，而不必等某个在线的老成员同步。
+// 墓碑记录删除时的已知最高 rev（至少为 1）：旧快照（mergeAll）或滞后消息若携带 <= 墓碑版本的
+// 元素不会使已删元素复活；而更高 rev 的显式 upsert 则可正常更新/恢复。
 type store struct {
-	mu       sync.RWMutex
-	elements map[string]map[string]interface{}
+	mu         sync.RWMutex
+	elements   map[string]map[string]interface{}
+	tombstones map[string]int
 }
 
 func newStore() *store {
-	return &store{elements: make(map[string]map[string]interface{})}
+	return &store{
+		elements:   make(map[string]map[string]interface{}),
+		tombstones: make(map[string]int),
+	}
 }
 
 // revOf 取元素的版本号，缺失时按 0 处理。JSON 反序列化出的数字是 float64。
@@ -39,12 +44,8 @@ func revOf(el map[string]interface{}) int {
 	return 0
 }
 
-// beatsRevCid 与前端 src/js/network.js 的 beats() 完全一致：rev 大者赢；rev
-// 相同则 cid（最后一次改动的客户端 PeerJS id）字典序大者赢。前端所有端都按这条
-// 规则收敛同一个赢家；store 是房间的"真源快照"，必须用同一条规则选胜者。
-// 否则两个端同时改同一元素（rev 平局）时 store 保留的是先到的那个"输家"，
-// 之后任何新成员从 store 拉快照都会拿到错误版本，且因为 rev 相同、以后到达的
-// 赢家也永远覆盖不进去——房间内容长期分叉（见 TestStoreRevTieCID）。
+// beatsRevCid 与前端 src/js/crdt.js 的 beats() 完全一致：rev 大者赢；rev
+// 相同则 cid（最后一次改动的客户端 PeerJS id）字典序大者赢。
 func beatsRevCid(a, b map[string]interface{}) bool {
 	ar, br := revOf(a), revOf(b)
 	if ar != br {
@@ -62,7 +63,7 @@ func cidOf(el map[string]interface{}) string {
 	return v
 }
 
-// applyUpsert 按 (rev, cid) 更新单个元素。
+// applyUpsert 按 (rev, cid) 更新单个元素，拦截版本不高于墓碑的过期重放。
 func (s *store) applyUpsert(el map[string]interface{}) {
 	if el == nil {
 		return
@@ -73,22 +74,38 @@ func (s *store) applyUpsert(el map[string]interface{}) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if delRev, deleted := s.tombstones[id]; deleted {
+		if revOf(el) <= delRev {
+			return
+		}
+		delete(s.tombstones, id)
+	}
 	if cur, ok := s.elements[id]; !ok || beatsRevCid(el, cur) {
 		s.elements[id] = el
 	}
 }
 
-// applyDelete 删除单个元素。
+// applyDelete 删除单个元素并记录版本墓碑。
 func (s *store) applyDelete(id string) {
 	if id == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	curRev := 1
+	if cur, ok := s.elements[id]; ok {
+		if r := revOf(cur); r > curRev {
+			curRev = r
+		}
+	}
+	if prevDel, ok := s.tombstones[id]; ok && prevDel > curRev {
+		curRev = prevDel
+	}
+	s.tombstones[id] = curRev
 	delete(s.elements, id)
 }
 
-// mergeAll 合并一份快照（来自某成员的 state/fullSync），同样按 (rev, cid) 取新。
+// mergeAll 合并一份快照（来自某成员的 state/fullSync），按 (rev, cid) 取新并过滤已删墓碑。
 func (s *store) mergeAll(all map[string]map[string]interface{}) {
 	if len(all) == 0 {
 		return
@@ -99,6 +116,10 @@ func (s *store) mergeAll(all map[string]map[string]interface{}) {
 		if id == "" {
 			continue
 		}
+		if delRev, deleted := s.tombstones[id]; deleted && revOf(el) <= delRev {
+			continue
+		}
+		delete(s.tombstones, id)
 		if cur, ok := s.elements[id]; !ok || beatsRevCid(el, cur) {
 			s.elements[id] = el
 		}
@@ -106,10 +127,6 @@ func (s *store) mergeAll(all map[string]map[string]interface{}) {
 }
 
 // snapshot 返回快照副本，可直接塞进 {t:"state", elements:...} 发出去。
-//
-// 元素做深拷贝：调用方拿到快照后不应该能反过来改到 store 里的内容
-// （快照会先被 JSON 序列化发出去，但接口本身不应隐含"只读"约定）。
-// 入站方向不做深拷贝——入站元素由本 store 独占持有，序列化完即弃。
 func (s *store) snapshot() map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -120,8 +137,6 @@ func (s *store) snapshot() map[string]interface{} {
 	return out
 }
 
-// deepCopyMap 通过 JSON 往返深拷贝。元素本身来自 JSON 反序列化，
-// 因此一定可序列化；万一失败退化为浅拷贝（仍能保证 map 本身不被外部替换）。
 func deepCopyMap(m map[string]interface{}) map[string]interface{} {
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -148,7 +163,6 @@ func (s *store) size() int {
 	return len(s.elements)
 }
 
-// toJSON 输出快照的 JSON 文本，供 /dump 使用。
 func (s *store) toJSON() []byte {
 	return mustJSON(s.snapshot())
 }
