@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>实时协作白板 · 原型</title>
+<title>实时协作白板 · Realtime Whiteboard</title>
 <link rel="stylesheet" href="./css/variables.css" />
 <link rel="stylesheet" href="./css/layout.css" />
 <link rel="stylesheet" href="./css/toolbar.css" />
@@ -39,6 +39,15 @@
     </div>
     <input type="file" id="image-upload" accept="image/*" style="display:none" />
 
+    <div class="history-btns">
+      <button class="iconbtn" id="undo-btn" title="撤销 (Ctrl+Z)" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 015.5 5.5v0a5.5 5.5 0 01-5.5 5.5H11"/></svg>
+      </button>
+      <button class="iconbtn" id="redo-btn" title="重做 (Ctrl+Y / Ctrl+Shift+Z)" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 004 14.5v0A5.5 5.5 0 009.5 20H13"/></svg>
+      </button>
+    </div>
+
     <div class="spacer"></div>
 
     <div class="presence">
@@ -53,6 +62,7 @@
       </button>
       <input id="remote-id" class="rid" placeholder="输入房间ID" />
       <button class="tool mini" id="connect-btn">加入房间</button>
+      <button class="tool mini leave-btn" id="leave-btn" title="退出当前房间，返回个人画布" style="display:none;">离开房间</button>
       <span id="net-count" class="net-count">单人模式</span>
     </div>
 
@@ -68,9 +78,9 @@
     </div>
   </div>
 
-  <!-- 第二行：工具设定 + 删除 -->
-  <div class="ctx-bar" id="ctx-bar">
-    <div class="ctx" id="ctx-note">
+  <!-- 第二行：上下文属性栏 + 元素操作 -->
+  <div class="ctx-bar empty" id="ctx-bar">
+    <div class="ctx hidden" id="ctx-note">
       <div class="swatches" id="note-swatches"></div>
       <label class="fs-label">字号 <input type="range" id="note-font-size" min="0" max="100" value="17" class="fs-slider"/><span id="note-font-size-val">16</span></label>
       <label class="fs-label">背景 <input type="range" id="note-bg-opacity" min="0" max="100" value="88" class="fs-slider"/><span id="note-bg-opacity-val">88</span></label>
@@ -86,6 +96,10 @@
       <input type="color" id="conn-color" value="#9aa0b4" title="连线颜色"/>
     </div>
     <div class="spacer"></div>
+    <button class="tool mini" id="dup-btn" title="复制选中元素 (Ctrl+D)" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+      复制
+    </button>
     <button class="tool mini" id="delete-btn" title="删除选中 (Del)" style="display:none;">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>
       删除
@@ -93,7 +107,7 @@
   </div>
 
   <!-- 画布 -->
-  <div class="stage" id="stage">
+  <div class="stage tool-select" id="stage">
     <canvas id="board"></canvas>
     <textarea id="editor" spellcheck="false"></textarea>
 
@@ -106,9 +120,9 @@
       <button class="hint-close" id="hint-close-btn" title="关闭提示">×</button>
       <b>提示</b>：拖空白处平移 · 滚轮缩放 · 双击便签编辑<br>
       图片：点 <b>图片</b> 按钮上传 · <kbd>Ctrl+V</kbd> 粘贴 (P2P同步)<br>
-      便签：右键删除 / 顶部换色 · <kbd>Del</kbd> 删除选中<br>
-      旋转：选中后拖 <b>顶部圆点</b> 旋转 · 角点等比缩放 · <kbd>Shift+R</kbd> 转15° / <kbd>Shift+0</kbd> 复位<br>
-      同屏：点 <b>分享链接</b> 发给好友直接加入，或输入ID连接
+      编辑：选中元素自动显示属性栏 · <kbd>Ctrl+D</kbd> 复制 · <kbd>Del</kbd> 删除<br>
+      旋转：选中后拖 <b>顶部圆点</b> 旋转 · 角点等比缩放 · <kbd>Shift+R</kbd> 转15°<br>
+      同屏：点 <b>分享链接</b> 邀请好友，或输入房间号加入
     </div>
     <div class="toast" id="toast"></div>
   </div>

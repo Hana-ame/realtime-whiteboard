@@ -1,48 +1,70 @@
 /**
- * Toolbar UI and controls
+ * Toolbar UI, context-aware property bar, and viewport controls
  * @module toolbar
  */
 
-import { state, NOTE_COLORS, PEN_COLORS, pushUndo, upsert, removeEl } from './state.js';
+import {
+  state, NOTE_COLORS, PEN_COLORS, CONN_COLORS,
+  pushUndo, upsert, removeEl, undo, redo, duplicateSelected, undoStack, redoStack,
+} from './state.js';
 import { requestRender } from './renderer.js';
-import { clamp, screenToWorld } from './utils.js';
-import { contentBounds, insertImageFile } from './interaction.js';
+import { clamp, screenToWorld, toast } from './utils.js';
+import { contentBounds } from './geometry.js';
+import { insertImageFile } from './interaction.js';
+import { bus, EVENTS } from './events.js';
+
+const FS_MIN = 10, FS_MAX = 960, FS_LOG = Math.log(FS_MAX / FS_MIN);
+const fsToSlider = fs => Math.round(100 * Math.log(Math.max(FS_MIN, fs) / FS_MIN) / FS_LOG);
+const sliderToFs = v => Math.round(FS_MIN * Math.pow(FS_MAX / FS_MIN, v / 100));
 
 export function initToolbar() {
   document.getElementById('tools').addEventListener('click', e => {
     const b = e.target.closest('.tool');
-    if (!b) return;
+    if (!b || !b.dataset.tool) return;
     selectTool(b.dataset.tool);
   });
 
+  // Note color swatches
   const ns = document.getElementById('note-swatches');
+  ns.innerHTML = '';
   NOTE_COLORS.forEach((c, i) => {
     const d = document.createElement('div');
     d.className = 'sw' + (i === 0 ? ' sel' : '');
+    d.dataset.color = c;
     d.style.background = c;
     d.addEventListener('click', () => {
       state.noteColor = c;
       document.querySelectorAll('#note-swatches .sw').forEach(x => x.classList.remove('sel'));
       d.classList.add('sel');
-      if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
+      const sel = state.selectedId && state.elements[state.selectedId];
+      if (sel && sel.type === 'note') {
         pushUndo();
-        state.elements[state.selectedId].color = c;
-        upsert(state.elements[state.selectedId]);
+        sel.color = c;
+        upsert(sel);
       }
     });
     ns.appendChild(d);
   });
 
+  // Pen color swatches & custom color picker (also applies to selected stroke!)
   const ps = document.getElementById('pen-swatches');
+  ps.innerHTML = '';
   PEN_COLORS.forEach((c, i) => {
     const d = document.createElement('div');
     d.className = 'sw' + (i === 1 ? ' sel' : '');
+    d.dataset.color = c;
     d.style.background = c;
     d.addEventListener('click', () => {
       state.penColor = c;
       document.getElementById('pen-color').value = c.length === 7 ? c : '#e23b3b';
       document.querySelectorAll('#pen-swatches .sw').forEach(x => x.classList.remove('sel'));
       d.classList.add('sel');
+      const sel = state.selectedId && state.elements[state.selectedId];
+      if (sel && sel.type === 'stroke') {
+        pushUndo();
+        sel.color = c;
+        upsert(sel);
+      }
     });
     ps.appendChild(d);
   });
@@ -50,29 +72,36 @@ export function initToolbar() {
   document.getElementById('pen-color').addEventListener('input', e => {
     state.penColor = e.target.value;
     document.querySelectorAll('#pen-swatches .sw').forEach(x => x.classList.remove('sel'));
+    const sel = state.selectedId && state.elements[state.selectedId];
+    if (sel && sel.type === 'stroke') {
+      sel.color = state.penColor;
+      upsert(sel);
+    }
   });
 
   document.getElementById('pen-size').addEventListener('input', e => {
     state.penSize = +e.target.value;
     document.getElementById('pen-size-val').textContent = state.penSize;
+    const sel = state.selectedId && state.elements[state.selectedId];
+    if (sel && sel.type === 'stroke') {
+      sel.width = state.penSize;
+      upsert(sel);
+    }
   });
 
-  // Note font size (per-note, log scale 10→960)
-  const FS_MIN = 10, FS_MAX = 960, FS_LOG = Math.log(FS_MAX / FS_MIN);
+  // Note font size slider (log scale 10 -> 960)
   const fsSlider = document.getElementById('note-font-size');
   const fsVal = document.getElementById('note-font-size-val');
-  const fsToSlider = (fs) => Math.round(100 * Math.log(Math.max(FS_MIN, fs) / FS_MIN) / FS_LOG);
-  const sliderToFs = (v) => Math.round(FS_MIN * Math.pow(FS_MAX / FS_MIN, v / 100));
   fsSlider.value = fsToSlider(state.noteFontSize);
   fsVal.textContent = state.noteFontSize;
   fsSlider.addEventListener('input', e => {
     const size = sliderToFs(+e.target.value);
     state.noteFontSize = size;
     fsVal.textContent = size;
-    if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
-      pushUndo();
-      state.elements[state.selectedId].fontSize = size;
-      upsert(state.elements[state.selectedId]);
+    const sel = state.selectedId && state.elements[state.selectedId];
+    if (sel && sel.type === 'note') {
+      sel.fontSize = size;
+      upsert(sel);
     }
     requestRender();
   });
@@ -83,10 +112,10 @@ export function initToolbar() {
   bgOpSlider.addEventListener('input', e => {
     state.noteBgOpacity = +e.target.value;
     bgOpVal.textContent = state.noteBgOpacity;
-    if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
-      pushUndo();
-      state.elements[state.selectedId].bgOpacity = state.noteBgOpacity;
-      upsert(state.elements[state.selectedId]);
+    const sel = state.selectedId && state.elements[state.selectedId];
+    if (sel && sel.type === 'note') {
+      sel.bgOpacity = state.noteBgOpacity;
+      upsert(sel);
     }
     requestRender();
   });
@@ -97,34 +126,47 @@ export function initToolbar() {
   textOpSlider.addEventListener('input', e => {
     state.noteTextOpacity = +e.target.value;
     textOpVal.textContent = state.noteTextOpacity;
-    if (state.selectedId && state.elements[state.selectedId] && state.elements[state.selectedId].type === 'note') {
-      pushUndo();
-      state.elements[state.selectedId].textOpacity = state.noteTextOpacity;
-      upsert(state.elements[state.selectedId]);
+    const sel = state.selectedId && state.elements[state.selectedId];
+    if (sel && sel.type === 'note') {
+      sel.textOpacity = state.noteTextOpacity;
+      upsert(sel);
     }
     requestRender();
   });
 
-  // Connection color swatches
-  const CONN_COLORS = ['#9aa0b4','#e23b3b','#1f8a4c','#2b6fe2','#f59e0b','#8b3bd6','#1c1f2b'];
+  // Connection color swatches (also applies to selected connection!)
   const cs = document.getElementById('conn-swatches');
+  cs.innerHTML = '';
   CONN_COLORS.forEach((c, i) => {
     const d = document.createElement('div');
     d.className = 'sw' + (i === 0 ? ' sel' : '');
+    d.dataset.color = c;
     d.style.background = c;
     d.addEventListener('click', () => {
       state.connColor = c;
       document.getElementById('conn-color').value = c;
       document.querySelectorAll('#conn-swatches .sw').forEach(x => x.classList.remove('sel'));
       d.classList.add('sel');
+      const sel = state.selectedId && state.elements[state.selectedId];
+      if (sel && sel.type === 'connection') {
+        pushUndo();
+        sel.color = c;
+        upsert(sel);
+      }
     });
     cs.appendChild(d);
   });
   document.getElementById('conn-color').addEventListener('input', e => {
     state.connColor = e.target.value;
     document.querySelectorAll('#conn-swatches .sw').forEach(x => x.classList.remove('sel'));
+    const sel = state.selectedId && state.elements[state.selectedId];
+    if (sel && sel.type === 'connection') {
+      sel.color = state.connColor;
+      upsert(sel);
+    }
   });
 
+  // Viewport zoom controls
   document.getElementById('zoom-in').addEventListener('click', () => zoomBy(1.2));
   document.getElementById('zoom-out').addEventListener('click', () => zoomBy(1 / 1.2));
   document.getElementById('zoom-reset').addEventListener('click', () => {
@@ -137,7 +179,19 @@ export function initToolbar() {
   });
   document.getElementById('fit').addEventListener('click', fitToContent);
 
-  // Delete button (for mobile where right-click/keyboard are unavailable)
+  // Undo / Redo toolbar buttons
+  const undoBtn = document.getElementById('undo-btn');
+  const redoBtn = document.getElementById('redo-btn');
+  if (undoBtn) undoBtn.addEventListener('click', () => undo());
+  if (redoBtn) redoBtn.addEventListener('click', () => redo());
+
+  // Duplicate button
+  const dupBtn = document.getElementById('dup-btn');
+  if (dupBtn) {
+    dupBtn.addEventListener('click', () => duplicateSelected());
+  }
+
+  // Delete button
   document.getElementById('delete-btn').addEventListener('click', () => {
     if (state.selectedId) {
       pushUndo();
@@ -154,48 +208,89 @@ export function initToolbar() {
   fileInput.addEventListener('change', e => {
     const file = e.target.files[0];
     if (file) insertImageFile(file);
-    fileInput.value = ''; // reset to allow re-uploading same file
+    fileInput.value = '';
   });
 
-  // 提示框关闭逻辑
+  // Dismissible hint box
   const hintBox = document.getElementById('hint-box');
   const hintCloseBtn = document.getElementById('hint-close-btn');
   if (hintBox && hintCloseBtn) {
-    if (localStorage.getItem('wb-hint-dismissed') === '1') {
-      hintBox.style.display = 'none';
-    }
+    try {
+      if (localStorage.getItem('wb-hint-dismissed') === '1') {
+        hintBox.style.display = 'none';
+      }
+    } catch (e) {}
     hintCloseBtn.addEventListener('click', () => {
       hintBox.style.display = 'none';
       try { localStorage.setItem('wb-hint-dismissed', '1'); } catch (e) {}
     });
   }
+
+  bus.off(EVENTS.SELECTION_CHANGED, updateDeleteBtn);
+  bus.on(EVENTS.SELECTION_CHANGED, updateDeleteBtn);
+  bus.off(EVENTS.HISTORY_CHANGED, updateHistoryBtns);
+  bus.on(EVENTS.HISTORY_CHANGED, updateHistoryBtns);
+  updateHistoryBtns();
+  updateDeleteBtn();
+}
+
+export function updateHistoryBtns() {
+  const undoBtn = document.getElementById('undo-btn');
+  const redoBtn = document.getElementById('redo-btn');
+  if (undoBtn) undoBtn.disabled = undoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = redoStack.length === 0;
+}
+
+/**
+ * Synchronize context property bar visibility with both the active tool AND
+ * the currently selected element type so users can inspect/edit properties
+ * directly when clicking an element with the Select tool.
+ */
+function syncContextBar() {
+  const t = state.tool;
+  const sel = state.selectedId ? state.elements[state.selectedId] : null;
+  const showNote = t === 'note' || (sel && sel.type === 'note');
+  const showPen = t === 'pen' || (sel && sel.type === 'stroke');
+  const showConn = t === 'connect' || (sel && sel.type === 'connection');
+
+  const ctxNote = document.getElementById('ctx-note');
+  const ctxPen = document.getElementById('ctx-pen');
+  const ctxConn = document.getElementById('ctx-connect');
+  if (ctxNote) ctxNote.classList.toggle('hidden', !showNote);
+  if (ctxPen) ctxPen.classList.toggle('hidden', !showPen);
+  if (ctxConn) ctxConn.classList.toggle('hidden', !showConn);
+
+  const bar = document.getElementById('ctx-bar');
+  if (bar) {
+    bar.classList.toggle('empty', !showNote && !showPen && !showConn && !state.selectedId);
+  }
 }
 
 export function selectTool(t) {
   state.tool = t;
-  document.querySelectorAll('.tool').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
-  document.getElementById('ctx-note').classList.toggle('hidden', t !== 'note');
-  document.getElementById('ctx-pen').classList.toggle('hidden', t !== 'pen');
-  document.getElementById('ctx-connect').classList.toggle('hidden', t !== 'connect');
-  const bar = document.getElementById('ctx-bar');
-  if (bar) bar.classList.toggle('empty', t !== 'note' && t !== 'pen' && t !== 'connect' && !state.selectedId);
+  document.querySelectorAll('.tool[data-tool]').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
+  syncContextBar();
   const stage = document.getElementById('stage');
-  stage.classList.remove('tool-select', 'tool-note', 'tool-pen', 'tool-connect', 'tool-pan');
-  stage.classList.add('tool-' + t);
+  if (stage) {
+    stage.classList.remove('tool-select', 'tool-note', 'tool-pen', 'tool-connect', 'tool-pan');
+    stage.classList.add('tool-' + t);
+  }
   if (t !== 'connect') state.connectFrom = null;
+  bus.emit(EVENTS.TOOL_CHANGED, t);
   requestRender();
 }
 
 export function updateDeleteBtn() {
-  const btn = document.getElementById('delete-btn');
-  if (btn) btn.style.display = state.selectedId ? '' : 'none';
-  // Sync font size slider with selected note (log scale)
+  const delBtn = document.getElementById('delete-btn');
+  const dupBtn = document.getElementById('dup-btn');
   const el = state.selectedId ? state.elements[state.selectedId] : null;
+  if (delBtn) delBtn.style.display = el ? '' : 'none';
+  if (dupBtn) dupBtn.style.display = (el && el.type !== 'connection') ? '' : 'none';
+
   if (el && el.type === 'note') {
     const fs = el.fontSize || 16;
     state.noteFontSize = fs;
-    const FS_MIN = 10, FS_MAX = 960, FS_LOG = Math.log(FS_MAX / FS_MIN);
-    document.getElementById('note-font-size').value = Math.round(100 * Math.log(Math.max(FS_MIN, fs) / FS_MIN) / FS_LOG);
+    document.getElementById('note-font-size').value = fsToSlider(fs);
     document.getElementById('note-font-size-val').textContent = fs;
     const bgOp = el.bgOpacity ?? 88;
     state.noteBgOpacity = bgOp;
@@ -205,17 +300,32 @@ export function updateDeleteBtn() {
     state.noteTextOpacity = textOp;
     document.getElementById('note-text-opacity').value = textOp;
     document.getElementById('note-text-opacity-val').textContent = textOp;
+    document.querySelectorAll('#note-swatches .sw').forEach(sw => {
+      sw.classList.toggle('sel', sw.dataset.color === el.color);
+    });
+  } else if (el && el.type === 'stroke') {
+    state.penColor = el.color || state.penColor;
+    state.penSize = el.width || state.penSize;
+    document.getElementById('pen-size').value = state.penSize;
+    document.getElementById('pen-size-val').textContent = state.penSize;
+    if (state.penColor.length === 7) document.getElementById('pen-color').value = state.penColor;
+    document.querySelectorAll('#pen-swatches .sw').forEach(sw => {
+      sw.classList.toggle('sel', sw.dataset.color === state.penColor);
+    });
+  } else if (el && el.type === 'connection') {
+    state.connColor = el.color || state.connColor;
+    if (state.connColor.length === 7) document.getElementById('conn-color').value = state.connColor;
+    document.querySelectorAll('#conn-swatches .sw').forEach(sw => {
+      sw.classList.toggle('sel', sw.dataset.color === state.connColor);
+    });
   }
-  // Toggle empty state on ctx-bar
-  const bar = document.getElementById('ctx-bar');
-  if (bar) {
-    const toolActive = state.tool === 'note' || state.tool === 'pen' || state.tool === 'connect';
-    bar.classList.toggle('empty', !toolActive && !state.selectedId);
-  }
+
+  syncContextBar();
 }
 
 export function updateZoomLabel() {
-  document.getElementById('zoom-reset').textContent = Math.round(state.view.scale * 100) + '%';
+  const z = document.getElementById('zoom-reset');
+  if (z) z.textContent = Math.round(state.view.scale * 100) + '%';
 }
 
 export function zoomBy(f) {
@@ -230,7 +340,7 @@ export function zoomBy(f) {
 
 export function fitToContent() {
   const b = contentBounds();
-  const cw = b.maxX - b.minX, ch = b.maxY - b.minY;
+  const cw = Math.max(1, b.maxX - b.minX), ch = Math.max(1, b.maxY - b.minY);
   const s = clamp(Math.min(state.W / cw, state.H / ch) * 0.85, 0.15, 2);
   state.view.scale = s;
   state.view.x = state.W / 2 - (b.minX + b.maxX) / 2 * s;

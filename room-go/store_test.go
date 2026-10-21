@@ -35,19 +35,15 @@ func TestStoreUpsertAndSnapshot(t *testing.T) {
 	if _, ok := snap["n1"]; !ok {
 		t.Fatalf("快照缺少 n1：%v", snap)
 	}
-	// 快照必须能直接塞进 state 消息发出去
 	_ = mustJSON(snap)
 }
 
-// TestStoreRevConflict 核心语义：低 rev 不得覆盖高 rev，这是快照能容忍
-// 乱序/重复/过期消息的前提。
 func TestStoreRevConflict(t *testing.T) {
 	s := newStore()
 	s.applyUpsert(mustRevOf(t, `{"el":{"id":"n1","text":"NEW","rev":5}}`))
-	s.applyUpsert(mustRevOf(t, `{"el":{"id":"n1","text":"OLD","rev":3}}`))  // 过期，应被丢弃
-	s.applyUpsert(mustRevOf(t, `{"el":{"id":"n1","text":"SAME","rev":5}}`)) // 同 rev，应被丢弃
+	s.applyUpsert(mustRevOf(t, `{"el":{"id":"n1","text":"OLD","rev":3}}`))
+	s.applyUpsert(mustRevOf(t, `{"el":{"id":"n1","text":"SAME","rev":5}}`))
 
-	// 直接读回元素（走快照路径）
 	snap := s.snapshot()
 	n1 := snap["n1"].(map[string]interface{})
 	if n1["text"] != "NEW" {
@@ -61,7 +57,7 @@ func TestStoreRevConflict(t *testing.T) {
 	}
 }
 
-// TestStoreDelete 删除后快照不再含该元素；重新 upsert 可复活。
+// TestStoreDelete 删除后快照不再含该元素；旧版本快照 mergeAll 不会复活，更高 rev 的显式 upsert 可恢复。
 func TestStoreDelete(t *testing.T) {
 	s := newStore()
 	s.applyUpsert(mustRevOf(t, `{"el":{"id":"n1","rev":1}}`))
@@ -70,23 +66,32 @@ func TestStoreDelete(t *testing.T) {
 		t.Fatalf("删除后 size=%d，期望 0", s.size())
 	}
 	s.applyDelete("not-exists") // 幂等，不应 panic
+
+	// 旧快照（rev=1 <= 墓碑 rev=1）不能把已删除元素复活
+	s.mergeAll(map[string]map[string]interface{}{
+		"n1": {"id": "n1", "rev": float64(1)},
+	})
+	if s.size() != 0 {
+		t.Fatalf("旧快照不应复活已删除元素")
+	}
+
+	// 更高 rev（rev=2 > 1）显式 upsert 可恢复（例如协同撤销删除）
 	s.applyUpsert(mustRevOf(t, `{"el":{"id":"n1","rev":2}}`))
 	if s.size() != 1 {
 		t.Fatalf("复活失败")
 	}
 }
 
-// TestStoreMergeAll 成员推送的完整快照按 rev 合并，而不是整表覆盖。
 func TestStoreMergeAll(t *testing.T) {
 	s := newStore()
 	s.applyUpsert(mustRevOf(t, `{"el":{"id":"a","text":"local-new","rev":9}}`))
 	s.applyUpsert(mustRevOf(t, `{"el":{"id":"b","text":"old","rev":1}}`))
 
 	all := map[string]map[string]interface{}{
-		"a": map[string]interface{}{"id": "a", "text": "incoming-old", "rev": float64(2)},
-		"b": map[string]interface{}{"id": "b", "text": "incoming-new", "rev": float64(7)},
-		"c": map[string]interface{}{"id": "c", "text": "incoming-new", "rev": float64(1)},
-		"":  map[string]interface{}{"id": "", "rev": float64(1)}, // 空 id 应被跳过
+		"a": {"id": "a", "text": "incoming-old", "rev": float64(2)},
+		"b": {"id": "b", "text": "incoming-new", "rev": float64(7)},
+		"c": {"id": "c", "text": "incoming-new", "rev": float64(1)},
+		"":  {"id": "", "rev": float64(1)},
 	}
 	s.mergeAll(all)
 
@@ -102,7 +107,6 @@ func TestStoreMergeAll(t *testing.T) {
 	}
 }
 
-// TestStoreRevOf 覆盖 rev 的各种输入类型，尤其是 JSON 反序列化产生的 float64。
 func TestStoreRevOf(t *testing.T) {
 	cases := []struct {
 		val  interface{}
@@ -112,7 +116,7 @@ func TestStoreRevOf(t *testing.T) {
 		{int(7), 7},
 		{int64(9), 9},
 		{json.Number("3"), 3},
-		{"3", 0}, // 字符串不被当数字，按 0 处理
+		{"3", 0},
 		{nil, 0},
 		{"", 0},
 	}
@@ -127,36 +131,31 @@ func TestStoreRevOf(t *testing.T) {
 	}
 }
 
-// TestStoreRevTieCID rev 平局时按 cid 决胜，与前端 beats() 完全一致（收敛规则
-// 唯一）。修复前 store 只看 rev：两个端同时改同一元素时先到的那个版本卡死在
-// store 里，无论到达顺序如何都不再改变——新成员拉快照会拿到"输家"版本，且
-// 因为 rev 相同，以后到达的赢家也永远覆盖不进去，房间内容长期分叉。
 func TestStoreRevTieCID(t *testing.T) {
 	fromA := parseJSON(t, `{"id":"n1","text":"from-A","rev":5,"cid":"A"}`)
 	fromB := parseJSON(t, `{"id":"n1","text":"from-B","rev":5,"cid":"B"}`)
 
-	// 先 A 后 B：B 赢（cid 大）。
 	s := newStore()
 	s.applyUpsert(fromA)
 	s.applyUpsert(fromB)
 	if got := s.snapshot()["n1"].(map[string]interface{})["text"]; got != "from-B" {
 		t.Fatalf("先 A 后 B 保留 %v，期望 from-B", got)
 	}
-	// 先 B 后 A：仍是 B 赢——胜者不受到达顺序影响，这是收敛的前提。
+
 	s2 := newStore()
 	s2.applyUpsert(fromB)
 	s2.applyUpsert(fromA)
 	if got := s2.snapshot()["n1"].(map[string]interface{})["text"]; got != "from-B" {
 		t.Fatalf("先 B 后 A 保留 %v，期望 from-B", got)
 	}
-	// rev 不同时仍以 rev 优先：低 rev 高 cid 不得覆盖高 rev 低 cid。
+
 	s3 := newStore()
 	s3.applyUpsert(parseJSON(t, `{"id":"n1","text":"high-rev","rev":6,"cid":"A"}`))
 	s3.applyUpsert(parseJSON(t, `{"id":"n1","text":"low-rev","rev":5,"cid":"Z"}`))
 	if got := s3.snapshot()["n1"].(map[string]interface{})["text"]; got != "high-rev" {
 		t.Fatalf("rev 优先被破坏：%v", got)
 	}
-	// 完全相同的元素（rev 与 cid 都相等）不覆盖：保持先到的。
+
 	s4 := newStore()
 	s4.applyUpsert(parseJSON(t, `{"id":"n1","text":"same","rev":5,"cid":"B"}`))
 	s4.applyUpsert(parseJSON(t, `{"id":"n1","text":"same","rev":5,"cid":"B"}`))
@@ -165,7 +164,6 @@ func TestStoreRevTieCID(t *testing.T) {
 	}
 }
 
-// TestStoreMergeAllTieCID mergeAll 同样按 (rev, cid) 取新，与 applyUpsert 一致。
 func TestStoreMergeAllTieCID(t *testing.T) {
 	s := newStore()
 	s.applyUpsert(parseJSON(t, `{"id":"a","text":"old","rev":3,"cid":"A"}`))
@@ -178,12 +176,10 @@ func TestStoreMergeAllTieCID(t *testing.T) {
 	}
 }
 
-// TestStoreSnapshotIsCopy 快照是副本：拿到快照后改它不能污染 store。
 func TestStoreSnapshotIsCopy(t *testing.T) {
 	s := newStore()
 	s.applyUpsert(mustRevOf(t, `{"el":{"id":"n1","rev":1}}`))
 	out := s.snapshot()
-	// map 不能用 == 比较（编译期不允许），用底层指针判断是否同一份元素。
 	if reflect.ValueOf(out["n1"]).Pointer() == reflect.ValueOf(s.snapshot()["n1"]).Pointer() {
 		t.Fatal("snapshot 元素级未拷贝，外部可篡改 store")
 	}

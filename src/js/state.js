@@ -1,12 +1,15 @@
 /**
- * State management for the whiteboard
+ * State management, undo/redo history, and persistence for the whiteboard
  * @module state
  */
 
-import { hslColor, deepCopy, toast } from './utils.js';
+import { hslColor, deepCopy, toast, uid } from './utils.js';
+import { bus, EVENTS } from './events.js';
+import { computeStateDiff } from './crdt.js';
 
-export const NOTE_COLORS = ['#FFE08A','#FFB3BA','#BAFFC9','#BAE1FF','#E0BBE4','#FFD8A8'];
-export const PEN_COLORS  = ['#1c1f2b','#e23b3b','#1f8a4c','#2b6fe2','#f59e0b','#8b3bd6'];
+export const NOTE_COLORS = ['#FFE08A', '#FFB3BA', '#BAFFC9', '#BAE1FF', '#E0BBE4', '#FFD8A8'];
+export const PEN_COLORS  = ['#1c1f2b', '#e23b3b', '#1f8a4c', '#2b6fe2', '#f59e0b', '#8b3bd6'];
+export const CONN_COLORS = ['#9aa0b4', '#e23b3b', '#1f8a4c', '#2b6fe2', '#f59e0b', '#8b3bd6', '#1c1f2b'];
 
 export const state = {
   view: { x: 0, y: 0, scale: 1 },
@@ -16,58 +19,51 @@ export const state = {
   noteColor: NOTE_COLORS[0],
   penColor: PEN_COLORS[1],
   penSize: 4,
-  noteFontSize: 16, // default for new notes
-  noteBgOpacity: 88, // background opacity percent
-  noteTextOpacity: 72, // text opacity percent
-  connColor: '#9aa0b4',
+  noteFontSize: 16,
+  noteBgOpacity: 88,
+  noteTextOpacity: 72,
+  connColor: CONN_COLORS[0],
   drag: null,
   spaceDown: false,
   connectFrom: null,
-  pointerWorld: {x:0, y:0},
+  pointerWorld: { x: 0, y: 0 },
   editingId: null,
   W: 0,
   H: 0,
-  // Mutation counter: bumped on every structural change (add/remove/re-z/replace
-  // of elements). renderer.js caches sorted-id order, the grid pattern and the
-  // minimap contentBounds on it, so it MUST be bumped whenever state.elements
-  // membership or z-order can change — including wholesale replacement (undo/
-  // redo/fullSync/room switch).
+  // Structural mutation counter used to invalidate sortedIds & contentBounds caches
   __mut: 0,
-  // 当前画布是否属于"自己"（自己的房间 = 无 room= hash，或 hash 就是自己的
-  // PeerJS id）。进入别人的房间（URL room= / 手动输入 remoteId）时置 false：
-  // persist() 自动失效，收到的别人的画布只在内存处理、绝不写 localStorage，
-  // 否则下次自己打开看到的是别人的画布。hash 清空切回自己的房间时恢复 true，
-  // 并把自己的画布写回 localStorage。
-  persistable: true
+  // True only when viewing/editing the user's own room; false when inside a foreign room
+  persistable: true,
 };
 
 export const undoStack = [];
 export const redoStack = [];
 export const MAX_HISTORY = 60;
 
-export const peerId = Math.random().toString(36).slice(2,9);
-export const peerName = '用户' + peerId.slice(0,3).toUpperCase();
+export const peerId = Math.random().toString(36).slice(2, 9);
+export const peerName = '用户' + peerId.slice(0, 3).toUpperCase();
 export const peerColor = hslColor(peerId);
 export const peers = {};
 
-// 被删除的元素 id。本地删过就永不复活——否则收到旧快照会把已删元素重新拉出来。
-// 旧代码把 tombstones 放在 network.js，导致"本地自己删的元素"没有 tombstone，
-// 收到含该元素的 fullSync 照样复活。元素 id 是全局唯一 uid，不会重造，所以
-// tombstone 可以永久生效。
+// Deleted element IDs (tombstones) prevent stale snapshots from resurrecting deleted elements
 export const tombstones = new Set();
 
-// 内容缓存挂在具体房间下。旧代码固定写 'wb-elements-v1'，是全部房间共用的一个锅，
-// 换房间会把上一个房间的画布当成新房间的内容显示出来。
+// Room-scoped localStorage persistence key
 export let persistKey = 'wb-elements-v2:default';
-export function setPersistKey(k) { persistKey = k; }
+export function setPersistKey(k) {
+  persistKey = k;
+}
 export function getRoomKey() {
   return persistKey.replace(/^wb-elements-v2:/, '');
 }
 
-// 自己的 PeerJS id。peers 表按它做键，头像渲染要据此过滤掉自己。
+// Local PeerJS ID assigned by signaling server
 export let selfPeerId = null;
-export function setSelfPeerId(id) { selfPeerId = id; }
+export function setSelfPeerId(id) {
+  selfPeerId = id;
+}
 
+// Legacy dependency injection callbacks (kept alongside EventBus for backward compatibility)
 let _broadcastFn = null;
 let _requestRenderFn = null;
 let _clearImageCacheFn = null;
@@ -80,143 +76,251 @@ export function setDeps(broadcastFn, requestRenderFn, clearImageCacheFn, updateD
   _updateDeleteBtnFn = updateDeleteBtnFn;
 }
 
-/**
- * Persist elements to local storage
- */
-export function persist() {
-  // 别人的画布只在内存：进入别人的房间（persistable=false）后，任何 upsert /
-  // fullSync / 删除都不许落盘，否则下次自己打开画布看到的是别人的内容。
-  if (!state.persistable) return;
-  try {
-    localStorage.setItem(persistKey, JSON.stringify(state.elements));
-  } catch(e) {}
+function notifyRender() {
+  if (_requestRenderFn) _requestRenderFn();
+  bus.emit(EVENTS.RENDER_REQUEST);
+}
+
+function notifySelection() {
+  if (_updateDeleteBtnFn) _updateDeleteBtnFn();
+  bus.emit(EVENTS.SELECTION_CHANGED, state.selectedId);
+}
+
+function notifyBroadcast(msg) {
+  if (_broadcastFn) _broadcastFn(msg);
+  bus.emit(EVENTS.NET_BROADCAST, msg);
+}
+
+function notifyClearImageCache(id) {
+  if (_clearImageCacheFn) _clearImageCacheFn(id);
+  bus.emit(EVENTS.IMAGE_CACHE_CLEAR, id);
+}
+
+function notifyHistory() {
+  bus.emit(EVENTS.HISTORY_CHANGED, {
+    canUndo: undoStack.length > 0,
+    canRedo: redoStack.length > 0,
+  });
 }
 
 /**
- * Push current state to undo stack
+ * Reset whiteboard state cleanly (useful for room transitions and tests)
+ * @param {boolean} [clearHistory=true]
+ */
+export function resetState(clearHistory = true) {
+  state.elements = {};
+  state.selectedId = null;
+  state.editingId = null;
+  state.drag = null;
+  state.connectFrom = null;
+  state.__mut++;
+  if (clearHistory) {
+    undoStack.length = 0;
+    redoStack.length = 0;
+    tombstones.clear();
+  }
+  notifyHistory();
+  notifySelection();
+  notifyRender();
+}
+
+/**
+ * Persist elements to localStorage (only when in user's own room)
+ */
+export function persist() {
+  if (!state.persistable) return;
+  try {
+    localStorage.setItem(persistKey, JSON.stringify(state.elements));
+  } catch (e) {}
+}
+
+/**
+ * Push current state snapshot onto undo stack
  */
 export function pushUndo() {
   undoStack.push(deepCopy(state.elements));
   if (undoStack.length > MAX_HISTORY) undoStack.shift();
   redoStack.length = 0;
+  notifyHistory();
 }
 
 /**
- * Undo last action
+ * Broadcast incremental element changes produced by undo/redo to connected peers
+ * @param {Record<string, Object>} before
+ * @param {Record<string, Object>} restored
+ */
+function broadcastHistoryDelta(before, restored) {
+  if (!_broadcastFn && !bus._listeners.has(EVENTS.NET_BROADCAST)) return;
+  const { upserts, deletes } = computeStateDiff(before, restored, selfPeerId || '');
+  for (const id of deletes) {
+    notifyBroadcast({ t: 'delete', id });
+  }
+  for (const el of upserts) {
+    notifyBroadcast({ t: 'upsert', el });
+  }
+}
+
+/**
+ * Undo last action and synchronize incremental delta
  */
 export function undo() {
   if (!undoStack.length) return;
   redoStack.push(deepCopy(state.elements));
   const before = state.elements;
   const restored = undoStack.pop();
-  // 撤销删除的元素要清 tombstone，否则它会显示出来但再也无法被更新
+
   for (const id in restored) tombstones.delete(id);
-  // 撤销添加的元素要进 tombstone，否则旧 fullSync 会把它复活
   for (const id in before) {
-    if (!restored.hasOwnProperty(id)) tombstones.add(id);
+    if (!Object.prototype.hasOwnProperty.call(restored, id)) {
+      tombstones.add(id);
+      if (before[id]?.type === 'image') notifyClearImageCache(id);
+    }
   }
+
   state.elements = restored;
   state.selectedId = null;
-  state.__mut++; // 整幅替换：sortedIds / contentBounds 缓存必须失效
+  state.__mut++;
+  broadcastHistoryDelta(before, restored);
   persist();
-  // 刻意不广播：undo 是本地历史。广播全量快照会覆盖别人并发的改动，
-  // 而且旧快照里还留着已删元素，会触发"删除复活"（见 network.js fullSync 分支）
-  if (_requestRenderFn) _requestRenderFn();
-  if (_updateDeleteBtnFn) _updateDeleteBtnFn();
+  notifyHistory();
+  notifySelection();
+  notifyRender();
   toast('已撤销');
 }
 
 /**
- * Redo last action
+ * Redo last undone action and synchronize incremental delta
  */
 export function redo() {
   if (!redoStack.length) return;
   undoStack.push(deepCopy(state.elements));
   const before = state.elements;
   const restored = redoStack.pop();
+
   for (const id in restored) tombstones.delete(id);
-  // 重做删除的元素要进 tombstone，否则旧 fullSync 会把它复活
   for (const id in before) {
-    if (!restored.hasOwnProperty(id)) tombstones.add(id);
+    if (!Object.prototype.hasOwnProperty.call(restored, id)) {
+      tombstones.add(id);
+      if (before[id]?.type === 'image') notifyClearImageCache(id);
+    }
   }
+
   state.elements = restored;
   state.selectedId = null;
-  state.__mut++; // 整幅替换：sortedIds / contentBounds 缓存必须失效
+  state.__mut++;
+  broadcastHistoryDelta(before, restored);
   persist();
-  if (_requestRenderFn) _requestRenderFn();
-  if (_updateDeleteBtnFn) _updateDeleteBtnFn();
+  notifyHistory();
+  notifySelection();
+  notifyRender();
   toast('已重做');
 }
 
 /**
- * Update or insert an element
- * @param {Object} el 
- * @param {boolean} doBroadcast 
+ * Update or insert an element with monotonic revision and client ID
+ * @param {Object} el
+ * @param {boolean} [doBroadcast=true]
  */
 export function upsert(el, doBroadcast = true) {
+  if (!el || !el.id) return;
   const cur = state.elements[el.id];
   el.rev = Math.max(el.rev || 0, cur?.rev || 0) + 1;
   el.updatedAt = Date.now();
-  // cid = 最后一次改动的客户端（PeerJS id）。rev 是每元素自增计数器，本身不构成
-  // 全序：两个端同时改同一元素会算出相同 rev，严格 > 比较会丢掉第二条、谁赢取决于
-  // 网络到达顺序，端间永久分叉。带 cid 后所有端都能算出同一个赢家。
   el.cid = selfPeerId || el.cid || '';
   delete el._isLiveMove;
+  tombstones.delete(el.id);
   state.elements[el.id] = el;
-  state.__mut++; // 新增元素/替换/z 变化都会影响排序，sortedIds 缓存必须失效
+  state.__mut++;
   persist();
-  if (doBroadcast && _broadcastFn) _broadcastFn({ t: 'upsert', el: el });
-  if (_requestRenderFn) _requestRenderFn();
+  if (doBroadcast) notifyBroadcast({ t: 'upsert', el });
+  bus.emit(EVENTS.ELEMENT_UPSERTED, el);
+  notifyRender();
 }
 
 /**
- * Bring an element to the front (top of z-order) by re-inserting it
+ * Bring an element to the top of the z-order if it is not already at the top
+ * @param {string} id
  */
 export function bringToFront(id) {
   if (!state.elements[id]) return;
   const el = state.elements[id];
-  // 用显式 z 而非对象插入顺序：旧代码靠 delete+reinsert 改插入顺序且本地不广播，
-  // 各端叠放顺序分叉，点同一个交叠位置会选中不同元素。
   let maxZ = el.z || 0;
   for (const k in state.elements) {
     const z = state.elements[k].z || 0;
     if (z > maxZ) maxZ = z;
   }
-  if (el.z === maxZ) return;   // 已经在最上层，不动（否则每次点击都广播一次无意义变化）
+  if ((el.z || 0) === maxZ && Object.keys(state.elements).filter(k => (state.elements[k].z || 0) === maxZ).length <= 1) {
+    return;
+  }
+  if (el.z === maxZ) return;
   el.z = maxZ + 1;
-  upsert(el, true);            // 必须广播，否则各端又分叉
+  upsert(el, true);
 }
 
 /**
- * Remove an element by id
- * @param {string} id 
- * @param {boolean} doBroadcast 
+ * Remove an element by ID and cascade-delete any attached connections
+ * @param {string} id
+ * @param {boolean} [doBroadcast=true]
  */
 export function removeEl(id, doBroadcast = true) {
   if (!state.elements[id]) return;
   const el = state.elements[id];
-  if (el.type === 'image' && _clearImageCacheFn) _clearImageCacheFn(id);
+  if (el.type === 'image') notifyClearImageCache(id);
   delete state.elements[id];
   if (state.selectedId === id) state.selectedId = null;
   tombstones.add(id);
 
-  // 同时清理与该元素关联的所有连线
   const linkedConnections = [];
   for (const key in state.elements) {
-    const el = state.elements[key];
-    if (el && el.type === 'connection' && (el.from === id || el.to === id)) {
+    const item = state.elements[key];
+    if (item && item.type === 'connection' && (item.from === id || item.to === id)) {
       linkedConnections.push(key);
     }
   }
-  linkedConnections.forEach(connId => {
+  for (const connId of linkedConnections) {
     delete state.elements[connId];
     tombstones.add(connId);
-    if (doBroadcast && _broadcastFn) _broadcastFn({t: 'delete', id: connId});
-  });
+    if (doBroadcast) notifyBroadcast({ t: 'delete', id: connId });
+  }
 
-  state.__mut++; // 删除元素（含关联连线）：sortedIds / contentBounds 缓存必须失效
+  state.__mut++;
   persist();
-  if (doBroadcast && _broadcastFn) _broadcastFn({t: 'delete', id: id});
-  if (_requestRenderFn) _requestRenderFn();
-  if (_updateDeleteBtnFn) _updateDeleteBtnFn();
+  if (doBroadcast) notifyBroadcast({ t: 'delete', id });
+  bus.emit(EVENTS.ELEMENT_REMOVED, id);
+  notifySelection();
+  notifyRender();
+}
+
+/**
+ * Duplicate the currently selected element with a small spatial offset
+ * @returns {Object|null} The duplicated element
+ */
+export function duplicateSelected() {
+  const id = state.selectedId;
+  if (!id || !state.elements[id]) return null;
+  const src = state.elements[id];
+  if (src.type === 'connection') return null;
+
+  pushUndo();
+  const copy = deepCopy(src);
+  copy.id = uid();
+  copy.rev = 0;
+  const offset = 24;
+  if (copy.type === 'note' || copy.type === 'image') {
+    copy.x = (copy.x || 0) + offset;
+    copy.y = (copy.y || 0) + offset;
+  } else if (copy.type === 'stroke' && Array.isArray(copy.points)) {
+    copy.points = copy.points.map(p => ({ x: p.x + offset, y: p.y + offset }));
+  }
+  let maxZ = 0;
+  for (const k in state.elements) {
+    const z = state.elements[k].z || 0;
+    if (z > maxZ) maxZ = z;
+  }
+  copy.z = maxZ + 1;
+  upsert(copy, true);
+  state.selectedId = copy.id;
+  notifySelection();
+  toast('已复制元素');
+  return copy;
 }

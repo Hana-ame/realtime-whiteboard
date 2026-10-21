@@ -1,23 +1,27 @@
 /**
- * Note text editor
+ * Note text editor overlay
  * @module editor
  */
 
 import { state, upsert, pushUndo } from './state.js';
 import { worldToScreen } from './utils.js';
+import { broadcastThrottled, clearThrottled } from './network.js';
+import { requestRender } from './renderer.js';
 
 let editor;
 
 export function initEditor() {
   editor = document.getElementById('editor');
-  
+  if (!editor) return;
+
   editor.addEventListener('blur', () => closeEditor(true));
   editor.addEventListener('input', () => {
     if (state.editingId == null) return;
     const n = state.elements[state.editingId];
     if (n) {
       n.text = editor.value;
-      upsert(n);
+      broadcastThrottled(n);
+      requestRender();
     }
   });
   editor.addEventListener('keydown', e => {
@@ -30,6 +34,7 @@ export function initEditor() {
 }
 
 export function positionEditor(n) {
+  if (!editor || !n) return;
   const tl = worldToScreen(n.x, n.y, state.view);
   const s = state.view.scale;
   editor.style.left = tl.x + 'px';
@@ -41,30 +46,38 @@ export function positionEditor(n) {
   editor.style.padding = (Math.max(10, fs * 0.6) * s) + 'px';
   editor.style.lineHeight = '1.32';
   editor.style.borderRadius = (12 * s) + 'px';
-  editor.style.background = n.color;
-  // 便签带旋转时，编辑框跟着转（与 canvas 绘制同绕中心旋转，Word 式）
+  // Keep background transparent so the canvas-rendered note card (with exact
+  // bgOpacity and drop shadow) shows underneath without double-rendering text
+  editor.style.background = 'transparent';
+  editor.style.opacity = String((n.textOpacity ?? 72) / 100);
   editor.style.transformOrigin = 'center center';
   editor.style.transform = n.rotation ? `rotate(${n.rotation}rad)` : '';
 }
 
 export function openEditor(n) {
+  if (!editor || !n) return;
   state.editingId = n.id;
   pushUndo();
   editor.style.display = 'block';
   positionEditor(n);
   editor.style.color = '#1c1f2b';
   editor.value = n.text || '';
+  requestRender();
   editor.focus();
   editor.select();
 }
 
 export function closeEditor(save) {
   if (state.editingId == null) return;
-  const n = state.elements[state.editingId];
-  if (save && n) {
-    n.text = editor.value;
-    upsert(n);
-  }
-  editor.style.display = 'none';
+  const id = state.editingId;
+  const n = state.elements[id];
+  clearThrottled(id);
   state.editingId = null;
+  if (editor) editor.style.display = 'none';
+  if (save && n) {
+    n.text = editor ? editor.value : n.text;
+    upsert(n);
+  } else {
+    requestRender();
+  }
 }
